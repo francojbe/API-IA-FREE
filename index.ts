@@ -35,6 +35,81 @@ if (typeof Bun !== 'undefined') {
   app.use('/*', serveStatic({ root: './public' }));
 }
 
+// Endpoint compatible con OpenAI (Para n8n, Cursor, TypingMind, etc.)
+app.post('/v1/chat/completions', async (c) => {
+  const body = await c.req.json();
+  const messages = body.messages as ChatMessage[];
+  const streamRequested = body.stream === true;
+
+  if (streamRequested) {
+    return streamText(c, async (stream) => {
+      let success = false;
+      let usedService = '';
+
+      // Usamos la misma lógica de failover que el endpoint original
+      for (const service of rotationServices) {
+        try {
+          const aiStream = await service.chat(messages);
+          usedService = service.name;
+          for await (const chunk of aiStream) {
+            // Formato de streaming de OpenAI (SSE)
+            const data = JSON.stringify({
+              choices: [{ delta: { content: chunk } }]
+            });
+            await stream.write(`data: ${data}\n\n`);
+          }
+          success = true;
+          break;
+        } catch (e) {
+          console.error(`[OpenAI-Compat] Falló ${service.name}`);
+        }
+      }
+
+      if (!success && lastResortService) {
+        try {
+          const aiStream = await lastResortService.chat(messages);
+          usedService = lastResortService.name;
+          for await (const chunk of aiStream) {
+            const data = JSON.stringify({
+              choices: [{ delta: { content: chunk } }]
+            });
+            await stream.write(`data: ${data}\n\n`);
+          }
+          success = true;
+        } catch (e) {
+          console.error(`[OpenAI-Compat] Falló Fallback`);
+        }
+      }
+
+      await stream.write('data: [DONE]\n\n');
+    });
+  } else {
+    // Si no se pide streaming, recolectamos todo y respondemos un JSON normal
+    let fullText = '';
+    let success = false;
+    for (const service of rotationServices) {
+      try {
+        const aiStream = await service.chat(messages);
+        for await (const chunk of aiStream) fullText += chunk;
+        success = true;
+        break;
+      } catch (e) { }
+    }
+
+    if (!success && lastResortService) {
+      try {
+        const aiStream = await lastResortService.chat(messages);
+        for await (const chunk of aiStream) fullText += chunk;
+        success = true;
+      } catch (e) { }
+    }
+
+    return c.json({
+      choices: [{ message: { role: 'assistant', content: fullText } }]
+    });
+  }
+});
+
 // Middleware de autenticación simple
 app.use('/chat', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
@@ -42,6 +117,21 @@ app.use('/chat', async (c, next) => {
     const apiKey = c.req.header('x-api-key');
     if (apiKey !== authSecret) {
       return c.json({ error: 'Unauthorized: Invalid API Key' }, 401);
+    }
+  }
+  await next();
+});
+
+// Alias para el middleware en la ruta OpenAI-compatible
+app.use('/v1/*', async (c, next) => {
+  const authSecret = process.env.AUTH_SECRET;
+  if (authSecret) {
+    // n8n envía la clave como "Authorization: Bearer Clave"
+    const authHeader = c.req.header('Authorization');
+    const apiKey = authHeader ? authHeader.replace('Bearer ', '') : c.req.header('x-api-key');
+
+    if (apiKey !== authSecret) {
+      return c.json({ error: 'Unauthorized' }, 401);
     }
   }
   await next();
