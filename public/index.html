@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -17,7 +18,12 @@
             --border-color: #334155;
         }
 
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
         body {
             font-family: 'Inter', -apple-system, system-ui, sans-serif;
             background-color: var(--bg-color);
@@ -38,7 +44,13 @@
             align-items: center;
         }
 
-        header h1 { font-size: 1.25rem; font-weight: 700; background: linear-gradient(90deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
 
         .config-bar {
             padding: 0.75rem 1.5rem;
@@ -59,7 +71,9 @@
             font-size: 0.9rem;
         }
 
-        input:focus { border-color: var(--accent-color); }
+        input:focus {
+            border-color: var(--accent-color);
+        }
 
         #chat-container {
             flex: 1;
@@ -80,7 +94,17 @@
             animation: fadeIn 0.3s ease;
         }
 
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
 
         .message.user {
             align-self: flex-end;
@@ -103,7 +127,11 @@
             gap: 0.75rem;
         }
 
-        #user-input { flex: 1; padding: 0.75rem 1rem; font-size: 1rem; }
+        #user-input {
+            flex: 1;
+            padding: 0.75rem 1rem;
+            font-size: 1rem;
+        }
 
         button {
             background-color: var(--accent-color);
@@ -116,8 +144,16 @@
             transition: all 0.2s;
         }
 
-        button:hover { background-color: var(--accent-hover); transform: translateY(-1px); }
-        button:disabled { background-color: #475569; cursor: not-allowed; transform: none; }
+        button:hover {
+            background-color: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        button:disabled {
+            background-color: #475569;
+            cursor: not-allowed;
+            transform: none;
+        }
 
         .status-dot {
             width: 8px;
@@ -126,11 +162,19 @@
             display: inline-block;
             margin-right: 0.5rem;
         }
-        .status-online { background-color: #10b981; box-shadow: 0 0 10px #10b981; }
 
-        pre { white-space: pre-wrap; word-wrap: break-word; }
+        .status-online {
+            background-color: #10b981;
+            box-shadow: 0 0 10px #10b981;
+        }
+
+        pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
     </style>
 </head>
+
 <body>
     <header>
         <h1>Multi-IA Proxy Interface</h1>
@@ -144,7 +188,8 @@
 
     <div id="chat-container">
         <div class="message ai">
-            <strong>IA:</strong> ¡Hola! Soy tu asistente conectado a través de tu nuevo proxy de IA. Selecciona un modelo y empieza a preguntar.
+            <strong>IA:</strong> ¡Hola! Soy tu asistente conectado a través de tu nuevo proxy de IA. Selecciona un
+            modelo y empieza a preguntar.
         </div>
     </div>
 
@@ -180,11 +225,11 @@
             const aiPre = appendMessage('ai', '...');
             aiPre.id = 'streaming-text';
             aiPre.innerText = '';
-            
+
             sendBtn.disabled = true;
 
             try {
-                const response = await fetch('http://localhost:3000/chat', {
+                const response = await fetch('/chat', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -201,7 +246,7 @@
 
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
-                
+
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
@@ -219,4 +264,5 @@
         };
     </script>
 </body>
+
 </html>
