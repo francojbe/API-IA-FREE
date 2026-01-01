@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json bun.lock ./
 
 # Instalar dependencias usando Bun
-RUN bun install --frozen-lockfile
+RUN bun install
 
 # Copiar el resto del código
 COPY . .
