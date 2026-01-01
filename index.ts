@@ -26,6 +26,15 @@ const app = new Hono();
 // Middlewares
 app.use('*', cors());
 
+// Servir archivos estáticos (Frontend)
+if (typeof Bun !== 'undefined') {
+  const { serveStatic } = await import('hono/bun');
+  app.use('/*', serveStatic({ root: './public' }));
+} else {
+  const { serveStatic } = await import('@hono/node-server/serve-static');
+  app.use('/*', serveStatic({ root: './public' }));
+}
+
 // Middleware de autenticación simple
 app.use('/chat', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
