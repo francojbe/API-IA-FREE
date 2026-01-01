@@ -1,14 +1,18 @@
-FROM node:24-slim
+FROM oven/bun:latest
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm install
+# Copiar archivos de dependencias
+COPY package.json bun.lock ./
 
+# Instalar dependencias usando Bun
+RUN bun install --frozen-lockfile
+
+# Copiar el resto del código
 COPY . .
 
-# Exponer el puerto por defecto
+# Exponer el puerto
 EXPOSE 3000
 
-# Comando para iniciar la aplicación en Node.js
-CMD ["npm", "run", "node:start"]
+# Comando para iniciar la aplicación con Bun
+CMD ["bun", "run", "index.ts"]
