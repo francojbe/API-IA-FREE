@@ -120,13 +120,11 @@ app.get('/health', (c) => {
 
 // Inicio del servidor según el runtime
 if (typeof Bun !== 'undefined') {
+  // En Bun, no llamamos a Bun.serve() manualmente porque 
+  // la exportación por defecto de Hono ya lo activa.
   console.log(`Server running on Bun port ${process.env.PORT ?? 3000}`);
-  Bun.serve({
-    fetch: app.fetch,
-    port: process.env.PORT ?? 3000,
-  });
 } else {
-  // Fallback para Node.js
+  // Solo en Node.js necesitamos el servidor manual
   const { serve } = await import('@hono/node-server');
   const port = Number(process.env.PORT) || 3000;
   console.log(`Server running on Node.js port ${port}`);
