@@ -22,7 +22,8 @@ app.use('*', async (c, next) => {
   const start = Date.now();
   await next();
   const ms = Date.now() - start;
-  console.log(`[${new Date().toISOString()}] ${c.req.method} ${c.req.path} - ${c.res.status} (${ms}ms)`);
+  const time = new Date().toLocaleTimeString('es-CL', { hour12: false });
+  console.log(`[${time}] ⚡ ${c.req.method} ${c.req.path} | 🏁 Estado: ${c.res.status} | ⏱️  ${ms}ms`);
 });
 
 app.use('*', cors());
@@ -129,16 +130,16 @@ const handleChatCompletions = async (c: any) => {
   let body: any;
   try {
     body = await c.req.json();
-    console.log(`\n--- [DEBUG] INCOMING REQUEST ---`);
-    console.log(`Path: ${c.req.path}`);
-    console.log(`Model: ${body.model}`);
+    console.log(`\n✨ [PETICIÓN ENTRANTE] --------------------------`);
+    console.log(`📍 Ruta: ${c.req.path}`);
+    console.log(`🤖 Modelo: ${body.model || 'multi-ia-proxy'}`);
   } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
   let rawMessages = body.messages || body.input || [];
 
   const messages = cleanMessages(rawMessages);
-  console.log(`Cleaned Messages Count: ${messages.length}`);
+  console.log(`📝 Historial: ${messages.length} mensajes procesados`);
 
   const tools = normalizeTools(body.tools);
   const requestedModel = body.model || 'multi-ia-proxy';
@@ -165,7 +166,7 @@ const handleChatCompletions = async (c: any) => {
           }
           await stream.write(`data: [DONE]\n\n`);
           return;
-        } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
+        } catch (e: any) { console.error(`❌ [FALLO] ${service.name}: ${e.message || e}`); }
       }
     });
   } else {
@@ -174,7 +175,7 @@ const handleChatCompletions = async (c: any) => {
       try {
         let fullText = '';
         const toolCallMap = new Map<number, any>();
-        console.log(`[ATTEMPT] Using service: ${service.name}`);
+        console.log(`⚙️  Intentando con servicio: [${service.name}]`);
         const aiStream = await service.chat(messages, tools);
 
         for await (const delta of aiStream) {
@@ -193,12 +194,12 @@ const handleChatCompletions = async (c: any) => {
 
         const toolCalls = Array.from(toolCallMap.values());
         if (!fullText && toolCalls.length === 0) {
-          console.log(`[EMPTY RESPONSE] ${service.name} returned nothing, trying next...`);
+          console.log(`⚠️  [RESPUESTA VACÍA] ${service.name} sin contenido, probando siguiente...`);
           continue;
         }
 
         const isTool = toolCalls.length > 0;
-        console.log(`[SERVICE SUCCESS] (${service.name}) ToolCalls Found: ${toolCalls.length}`);
+        console.log(`✅ [ÉXITO] Servicio: ${service.name} | Herramientas: ${toolCalls.length}`);
 
         const usage = {
           prompt_tokens: messages.length * 10,
@@ -270,11 +271,11 @@ const handleChatCompletions = async (c: any) => {
           };
         }
 
-        console.log(`--- [DEBUG] OUTGOING RESPONSE (Status: ${response.status}) ---`);
-        console.log(`Output items: ${response.output.length}`);
+        console.log(`📤 [RESPUESTA ENVIADA] -------------------------`);
+        console.log(`📊 Estado global: ${response.status} | Salidas: ${response.output.length}`);
         return c.json(response);
-      } catch (e) {
-        console.error(`[FAIL] ${service.name}: ${e}`);
+      } catch (e: any) {
+        console.error(`❌ [FALLO] ${service.name}: ${e.message || e}`);
         // Si hay un error, el loop 'for' continúa automáticamente al siguiente servicio
       }
     }
@@ -304,11 +305,12 @@ app.get('/health', (c) => c.json({ status: 'ok', services: rotationServices.map(
 if (typeof Bun !== 'undefined') {
   const { serveStatic } = await import('hono/bun');
   app.use('/*', serveStatic({ root: './public' }));
-  console.log(`Server running on Bun port ${process.env.PORT ?? 3000}`);
+  console.log(`🚀 Servidor en línea (Bun) | Puerto: ${process.env.PORT ?? 3000}`);
 } else {
   const { serveStatic } = await import('@hono/node-server/serve-static');
   app.use('/*', serveStatic({ root: './public' }));
   const { serve } = await import('@hono/node-server');
+  console.log(`🚀 Servidor en línea (Node.js) | Puerto: ${process.env.PORT ?? 3000}`);
   serve({ fetch: app.fetch, port: Number(process.env.PORT) || 3000 });
 }
 export default app;
