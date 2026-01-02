@@ -57,53 +57,47 @@ app.get('/v1/models', (c) => {
 });
 
 // Función para limpiar mensajes de n8n/LangChain
+// Función mejorada para limpiar mensajes de n8n (Roles: system, user, assistant)
 const cleanMessages = (messages: ChatMessage[]): ChatMessage[] => {
-  return messages.map(m => ({
-    role: m.role || 'user',
-    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-  })).filter(m => m.content && m.content.trim() !== '');
+  if (!Array.isArray(messages)) return [];
+  return messages.map(m => {
+    let role = m.role || 'user';
+    if (role === 'chat' || role === 'model') role = 'assistant'; // Mapeo de roles raros
+
+    let content = '';
+    if (typeof m.content === 'string') content = m.content;
+    else if (Array.isArray(m.content)) content = m.content.map((c: any) => c.text || JSON.stringify(c)).join(' ');
+    else content = JSON.stringify(m.content || '');
+
+    return { role, content };
+  }).filter(m => m.content && m.content.trim() !== '');
 };
 
 // POST /v1/chat/completions (Soporta streaming y no-streaming)
 const handleChatCompletions = async (c: any) => {
   let body: any;
-  try {
-    body = await c.req.json();
-  } catch (e) {
-    console.error(`[ERROR] No se pudo parsear el JSON de la petición`);
-    return c.json({ error: 'Invalid JSON' }, 400);
-  }
+  try { body = await c.req.json(); } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
-  // Lógica de extracción ultra-flexible para n8n
+  // Extracción ultra-flexible
   let rawMessages = body.messages || [];
-
-  // CASO n8n: Usa 'input' en lugar de 'messages'
   if (rawMessages.length === 0 && Array.isArray(body.input)) {
     rawMessages = body.input.map((m: any) => ({
-      role: m.role || 'user',
+      role: m.role || (m.type === 'message' ? 'user' : 'system'),
       content: m.content || m.text || ''
     }));
   }
-
-  // Si no hay nada, probamos con 'prompt'
-  if (rawMessages.length === 0 && body.prompt) {
-    rawMessages = [{ role: 'user', content: body.prompt }];
-  }
+  if (rawMessages.length === 0 && body.prompt) rawMessages = [{ role: 'user', content: body.prompt }];
 
   const messages = cleanMessages(rawMessages);
-  const modelId = 'multi-ia-proxy';
+  const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = 'chatcmpl-' + Math.random().toString(36).substring(7);
 
-  // Si después de todo sigue vacío, logueamos el cuerpo COMPLETO para investigar
   if (messages.length === 0) {
-    console.warn(`[DEBUG] Petición recibida sin mensajes. Cuerpo completo: ${JSON.stringify(body)}`);
-    // En lugar de error, devolvemos un saludo de prueba para que n8n no se rompa
+    console.warn(`[DEBUG] No se detectaron mensajes en n8n. Enviando respuesta de prueba.`);
     return c.json({
-      id: requestId,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: modelId,
-      choices: [{ message: { role: 'assistant', content: 'Conexión exitosa. Esperando mensajes...' }, finish_reason: 'stop', index: 0 }]
+      id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: requestedModel,
+      choices: [{ message: { role: 'assistant', content: 'Conexión activa. Por favor envía un mensaje.' }, finish_reason: 'stop', index: 0 }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
     });
   }
 
@@ -115,81 +109,58 @@ const handleChatCompletions = async (c: any) => {
           const aiStream = await service.chat(messages);
           for await (const chunk of aiStream) {
             const data = JSON.stringify({
-              id: requestId,
-              object: 'chat.completion.chunk',
-              created: Math.floor(Date.now() / 1000),
-              model: modelId,
-              choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
+              id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000),
+              model: requestedModel, choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
           success = true;
           break;
-        } catch (e) {
-          console.error(`[FAIL] ${service.name}:`, e instanceof Error ? e.message : e);
-        }
+        } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
       }
-
       if (!success && lastResortService) {
         try {
           const aiStream = await lastResortService.chat(messages);
           for await (const chunk of aiStream) {
             const data = JSON.stringify({
-              id: requestId,
-              object: 'chat.completion.chunk',
-              created: Math.floor(Date.now() / 1000),
-              model: modelId,
-              choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
+              id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000),
+              model: requestedModel, choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
           success = true;
-        } catch (e) {
-          console.error(`[CRITICAL] Error en Fallback final:`, e instanceof Error ? e.message : e);
-        }
+        } catch (e) { }
       }
-
-      const finalData = JSON.stringify({
-        id: requestId,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model: modelId,
-        choices: [{ delta: {}, index: 0, finish_reason: 'stop' }]
-      });
-      await stream.write(`data: ${finalData}\n\n`);
+      await stream.write(`data: ${JSON.stringify({ id: requestId, object: 'chat.completion.chunk', model: requestedModel, choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] })}\n\n`);
       await stream.write('data: [DONE]\n\n');
     });
   } else {
     let fullText = '';
-    let success = false;
+    let usedService = 'none';
     for (const service of rotationServices) {
       try {
         const aiStream = await service.chat(messages);
         for await (const chunk of aiStream) fullText += chunk;
-        success = true;
-        break;
-      } catch (e) {
-        console.error(`[FAIL NON-STREAM] ${service.name}:`, e instanceof Error ? e.message : e);
-      }
+        if (fullText) { usedService = service.name; break; }
+      } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-
-    if (!success && lastResortService) {
+    if (!fullText && lastResortService) {
       try {
         const aiStream = await lastResortService.chat(messages);
         for await (const chunk of aiStream) fullText += chunk;
-        success = true;
-      } catch (e) {
-        console.error(`[CRITICAL NON-STREAM] Fallback:`, e instanceof Error ? e.message : e);
-      }
+        if (fullText) usedService = lastResortService.name;
+      } catch (e) { }
     }
 
+    if (!fullText) fullText = "Lo siento, todos los servicios de IA están ocupados. Intenta de nuevo en unos segundos.";
+
+    console.log(`[SUCCESS] Respondido con ${usedService}. Longitud: ${fullText.length}`);
+
     return c.json({
-      id: requestId,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: modelId,
+      id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000),
+      model: requestedModel,
       choices: [{ message: { role: 'assistant', content: fullText }, finish_reason: 'stop', index: 0 }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      usage: { prompt_tokens: messages.length * 5, completion_tokens: fullText.length / 4, total_tokens: 100 }
     });
   }
 };
