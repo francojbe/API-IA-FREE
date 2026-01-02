@@ -154,14 +154,32 @@ const handleChatCompletions = async (c: any) => {
 
     if (!fullText) fullText = "Lo siento, todos los servicios de IA están ocupados. Intenta de nuevo en unos segundos.";
 
-    console.log(`[SUCCESS] Respondido con ${usedService}. Longitud: ${fullText.length}`);
+    // Cálculo preciso de tokens (LangChain es estricto con los enteros y la suma total)
+    const promptTokens = Math.max(1, messages.length * 10);
+    const completionTokens = Math.ceil(fullText.length / 4);
+    const totalTokens = promptTokens + completionTokens;
 
-    return c.json({
-      id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000),
+    const responseBody = {
+      id: requestId,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
       model: requestedModel,
-      choices: [{ message: { role: 'assistant', content: fullText }, finish_reason: 'stop', index: 0 }],
-      usage: { prompt_tokens: messages.length * 5, completion_tokens: fullText.length / 4, total_tokens: 100 }
-    });
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: fullText },
+        logprobs: null, // Obligatorio para algunas versiones de LangChain
+        finish_reason: 'stop'
+      }],
+      usage: {
+        prompt_tokens: promptTokens,
+        completion_tokens: completionTokens,
+        total_tokens: totalTokens
+      }
+    };
+
+    console.log(`[SUCCESS] Respondido con ${usedService}. Tokens: ${totalTokens}`);
+
+    return c.json(responseBody);
   }
 };
 
