@@ -147,6 +147,39 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
+        // Construir el array 'output' siguiendo el estándar OpenAI Responses API al pie de la letra
+        const outputItems: any[] = [];
+
+        // 1. Si hay texto, añadir un item de tipo 'message'
+        if (fullText) {
+          outputItems.push({
+            type: 'message',
+            status: 'completed',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'text', text: fullText }]
+            }
+          });
+        }
+
+        // 2. Si hay herramientas, añadirlas como items de tipo 'tool_call'
+        if (isTool) {
+          for (const tc of toolCalls) {
+            outputItems.push({
+              type: 'tool_call',
+              status: 'completed',
+              tool_call: {
+                id: tc.id,
+                type: 'function',
+                function: {
+                  name: tc.function.name,
+                  arguments: tc.function.arguments
+                }
+              }
+            });
+          }
+        }
+
         const response: any = {
           id: requestId,
           object: isResponsesApi ? 'response' : 'chat.completion',
@@ -158,14 +191,7 @@ const handleChatCompletions = async (c: any) => {
             message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
             finish_reason: isTool ? 'tool_calls' : 'stop'
           }],
-          output: [{
-            type: 'message',
-            role: 'assistant',
-            content: fullText ? [{ type: 'text', text: fullText }] : [],
-            tool_calls: isTool ? toolCalls : undefined,
-            status: 'completed',
-            finish_reason: isTool ? 'tool_calls' : 'stop'
-          }],
+          output: isResponsesApi ? outputItems : undefined,
           usage: usage,
           tokenUsageEstimate: usage
         };

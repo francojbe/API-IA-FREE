@@ -5,17 +5,15 @@ let cerebras: Cerebras;
 
 export const cerebrasService: AIService = {
   name: 'Cerebras',
-  async chat(messages: ChatMessage[], tools?: any[]) {
+  async *chat(messages: ChatMessage[], tools?: any[]) {
     if (!cerebras) {
-      cerebras = new Cerebras();
+      cerebras = new Cerebras({ apiKey: process.env.CEREBRAS_API_KEY });
     }
 
     const options: any = {
-      messages: messages as any,
-      model: 'llama3.1-70b',
+      model: "llama3.1-70b",
+      messages,
       stream: true,
-      max_completion_tokens: 40960,
-      temperature: 0.6,
     };
 
     if (tools && tools.length > 0) {
@@ -24,10 +22,11 @@ export const cerebrasService: AIService = {
 
     const stream = await cerebras.chat.completions.create(options);
 
-    return (async function* () {
-      for await (const chunk of stream) {
-        yield (chunk as any).choices[0]?.delta || {}
-      }
-    })()
+    for await (const chunk of stream) {
+      yield {
+        content: chunk.choices[0]?.delta?.content || "",
+        tool_calls: chunk.choices[0]?.delta?.tool_calls
+      };
+    }
   }
-}
+};
