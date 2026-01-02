@@ -18,7 +18,6 @@ const lastResortService = process.env.OPENROUTER_API_KEY ? openRouterService : n
 
 const app = new Hono();
 
-// Logger profesional para depuración en tiempo real
 app.use('*', async (c, next) => {
   const start = Date.now();
   await next();
@@ -28,7 +27,6 @@ app.use('*', async (c, next) => {
 
 app.use('*', cors());
 
-// Middleware de Autenticación
 app.use('/v1/*', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
   if (!authSecret) return await next();
@@ -43,32 +41,22 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
-// Normalizador de mensajes súper-robusto para n8n
 const cleanMessages = (messages: any[]): ChatMessage[] => {
   if (!Array.isArray(messages)) return [];
   return messages.map(m => {
-    // Detectar rol y normalizar a minúsculas
     let role = (m.role || m.type || 'user').toLowerCase();
     if (role === 'human' || role === 'user') role = 'user';
     else if (role === 'ai' || role === 'assistant' || role === 'model') role = 'assistant';
-    else if (role === 'system') role = 'system';
-    else if (role === 'tool') role = 'tool';
 
-    // Extraer contenido de texto (aplanar arrays de n8n)
     let content = "";
-    if (typeof m.content === 'string') {
-      content = m.content;
-    } else if (Array.isArray(m.content)) {
-      content = m.content.map((v: any) => v.text || v.text?.content || "").join(' ');
-    } else if (m.text) {
-      content = typeof m.text === 'string' ? m.text : (m.text.content || "");
-    }
+    if (typeof m.content === 'string') content = m.content;
+    else if (Array.isArray(m.content)) content = m.content.map((v: any) => v.text || "").join(' ');
+    else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
 
     const cleaned: ChatMessage = { role: role as any, content };
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
     if (m.tool_call_id) cleaned.tool_call_id = m.tool_call_id;
     if (m.name) cleaned.name = m.name;
-
     return cleaned;
   }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
@@ -91,11 +79,9 @@ const handleChatCompletions = async (c: any) => {
   const isResponsesApi = c.req.path.includes('/responses');
   const messages = cleanMessages(body.messages || body.input || []);
   const tools = normalizeTools(body.tools);
-  const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
   if (body.stream) {
-    // ... [Streaming logic maintained, focusing on non-streaming for the tool fix] ...
     return streamText(c, async (stream) => {
       for (const service of rotationServices) {
         try {
@@ -104,14 +90,14 @@ const handleChatCompletions = async (c: any) => {
             const data = JSON.stringify({
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
-              choices: [{ delta, index: 0, finish_reason: null }],
-              output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
+              choices: isResponsesApi ? undefined : [{ delta, index: 0, finish_reason: null }],
+              output: isResponsesApi ? [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }] : undefined
             });
             await stream.write(`data: ${data}\n\n`);
           }
           await stream.write(`data: [DONE]\n\n`);
           return;
-        } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
+        } catch (e) { }
       }
     });
   } else {
@@ -142,61 +128,48 @@ const handleChatCompletions = async (c: any) => {
         const isTool = toolCalls.length > 0;
         console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
-        // Usage con camelCase para n8n
-        const usage = {
-          prompt_tokens: messages.length * 10,
-          completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
-          total_tokens: (messages.length * 10) + 50,
-          promptTokens: messages.length * 10,
-          completionTokens: isTool ? 50 : Math.ceil(fullText.length / 4),
-          totalTokens: (messages.length * 10) + 50
-        };
-
         if (isResponsesApi) {
-          // FORMATO RESPONSES API (n8n v2 mejorado)
-          return c.json({
+          // CLON EXACTO DE OPENAI RESPONSES API
+          const response: any = {
             id: requestId,
             object: 'response',
             status: isTool ? 'requires_action' : 'completed',
-            model: requestedModel,
-            choices: [{ // Algunas versiones de n8n lo siguen necesitando
-              index: 0,
-              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-              finish_reason: isTool ? 'tool_calls' : 'stop'
-            }],
+            model: body.model || 'multi-ia-proxy',
             output: [{
               type: 'message',
-              status: 'completed',
               role: 'assistant',
               content: fullText ? [{ type: 'text', text: fullText }] : [],
-              tool_calls: isTool ? toolCalls : undefined,
-              finish_reason: isTool ? 'tool_calls' : 'stop' // CRÍTICO: Añadido finish_reason aquí
+              tool_calls: isTool ? toolCalls : undefined
             }],
-            required_action: isTool ? {
+            usage: { promptTokens: messages.length * 10, completionTokens: 50, totalTokens: 100 }
+          };
+
+          if (isTool) {
+            response.required_action = {
               type: 'submit_tool_outputs',
               submit_tool_outputs: { tool_calls: toolCalls }
-            } : undefined,
-            usage: usage,
-            usage_metadata: usage // Alias extra
-          });
+            };
+          }
+
+          return c.json(response);
         } else {
-          // FORMATO CHAT COMPLETION
+          // FORMATO CHAT CLÁSICO
           return c.json({
             id: requestId,
             object: 'chat.completion',
             created: Math.floor(Date.now() / 1000),
-            model: requestedModel,
+            model: body.model || 'multi-ia-proxy',
             choices: [{
               index: 0,
               message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
               finish_reason: isTool ? 'tool_calls' : 'stop'
             }],
-            usage: usage
+            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
           });
         }
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-    return c.json({ error: 'Fallo total de red' }, 503);
+    return c.json({ error: 'Service Unavailable' }, 503);
   }
 };
 
@@ -204,19 +177,17 @@ app.post('/v1/chat/completions', handleChatCompletions);
 app.post('/v1/responses', handleChatCompletions);
 
 app.post('/chat', async (c) => {
-  try {
-    const body: any = await c.req.json();
-    const messages = cleanMessages(body.messages || []);
-    return streamText(c, async (stream) => {
-      for (const service of rotationServices) {
-        try {
-          const aiStream = await service.chat(messages);
-          for await (const delta of aiStream) if (delta.content) await stream.write(delta.content);
-          return;
-        } catch (e) { }
-      }
-    });
-  } catch (e) { return c.json({ error: 'Invalid' }, 400); }
+  const body: any = await c.req.json();
+  const messages = cleanMessages(body.messages || []);
+  return streamText(c, async (stream) => {
+    for (const service of rotationServices) {
+      try {
+        const aiStream = await service.chat(messages);
+        for await (const delta of aiStream) if (delta.content) await stream.write(delta.content);
+        return;
+      } catch (e) { }
+    }
+  });
 });
 
 app.get('/health', (c) => c.json({ status: 'ok', services: rotationServices.map(s => s.name) }));
