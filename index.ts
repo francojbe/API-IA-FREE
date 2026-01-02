@@ -147,38 +147,19 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        // Construir el array 'output' siguiendo el estándar OpenAI Responses API al pie de la letra
+        // Construir el array 'output' siguiendo el estándar EXACTO que n8n/LangChain espera
         const outputItems: any[] = [];
 
-        // 1. Si hay texto, añadir un item de tipo 'message'
-        if (fullText) {
-          outputItems.push({
-            type: 'message',
-            status: 'completed',
-            message: {
-              role: 'assistant',
-              content: [{ type: 'text', text: fullText }]
-            }
-          });
-        }
-
-        // 2. Si hay herramientas, añadirlas como items de tipo 'tool_call'
-        if (isTool) {
-          for (const tc of toolCalls) {
-            outputItems.push({
-              type: 'tool_call',
-              status: 'completed',
-              tool_call: {
-                id: tc.id,
-                type: 'function',
-                function: {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments
-                }
-              }
-            });
+        // n8n espera un item de tipo 'message' que contenga tanto el texto como las herramientas
+        outputItems.push({
+          type: 'message',
+          status: 'completed',
+          message: {
+            role: 'assistant',
+            content: fullText ? [{ type: 'text', text: fullText }] : [],
+            tool_calls: isTool ? toolCalls : undefined
           }
-        }
+        });
 
         const response: any = {
           id: requestId,
