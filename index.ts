@@ -145,7 +145,9 @@ const handleChatCompletions = async (c: any) => {
 };
 
 app.post('/v1/chat/completions', handleChatCompletions);
-app.post('/v1/chat/completions/', handleChatCompletions); // Con barra final por si acaso
+app.post('/v1/chat/completions/', handleChatCompletions);
+app.post('/v1/responses', handleChatCompletions); // Soporte para n8n/LangChain específico
+app.post('/v1/responses/', handleChatCompletions);
 
 // --- ENDPOINTS ORIGINALES ---
 
