@@ -44,45 +44,74 @@ app.get('/v1/models', (c) => c.json({
 const cleanMessages = (messages: any): ChatMessage[] => {
   if (!messages) return [];
   const msgsArray = Array.isArray(messages) ? messages : [messages];
+  const cleaned: ChatMessage[] = [];
 
-  return msgsArray.map(m => {
-    // Si m es solo un string, convertirlo a un mensaje de usuario
-    if (typeof m === 'string') return { role: 'user' as const, content: m };
+  for (const m of msgsArray) {
+    if (!m) continue;
+
+    // Si m es solo un string, es un mensaje de usuario
+    if (typeof m === 'string') {
+      cleaned.push({ role: 'user', content: m });
+      continue;
+    }
 
     let role = (m.role || m.type || 'user').toLowerCase();
 
-    // Mapeo especializado para n8n Agent y Responses API
+    // Mapeo especializado para roles de n8n
     if (role === 'human' || role === 'user') role = 'user';
     else if (role === 'ai' || role === 'assistant' || role === 'model' || role === 'function_call') role = 'assistant';
     else if (role === 'tool' || role === 'function_call_output') role = 'tool';
     else if (role === 'system') role = 'system';
-    else role = 'user'; // Fallback seguro
+    else role = 'user';
 
     let content = "";
     if (typeof m.content === 'string') content = m.content;
     else if (Array.isArray(m.content)) {
-      content = m.content.map((v: any) => {
-        if (typeof v === 'string') return v;
-        return v.text || v.input || JSON.stringify(v);
-      }).join(' ');
+      content = m.content.map((v: any) => (typeof v === 'string' ? v : (v.text || v.input || JSON.stringify(v)))).join(' ');
     }
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
-    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || JSON.stringify(m);
+    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || m.arguments || JSON.stringify(m);
 
-    const cleaned: ChatMessage = { role: role as any, content };
+    const msg: ChatMessage = { role: role as any, content };
 
-    // Preservar metadatos de herramientas para el proveedor original
-    if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
-    if (m.tool_call_id || m.id) cleaned.tool_call_id = m.tool_call_id || m.id;
-
-    // Si el rol es 'tool' y no hay ID, Groq/OpenAI fallarán
-    if (role === 'tool' && !cleaned.tool_call_id) {
-      cleaned.tool_call_id = 'call_' + Math.random().toString(36).substring(7);
+    // Caso crítico: Reconstruir tool_calls para el asistente
+    if (role === 'assistant') {
+      if (m.tool_calls) {
+        msg.tool_calls = m.tool_calls;
+      } else if (m.name && m.arguments) {
+        // Viene de un item 'function_call' de n8n Responses API
+        msg.tool_calls = [{
+          id: m.id || m.tool_call_id || 'call_' + Math.random().toString(36).substring(7),
+          type: 'function',
+          function: { name: m.name, arguments: m.arguments }
+        }];
+        msg.content = "";
+      }
     }
 
-    if (m.name) cleaned.name = m.name;
-    return cleaned;
-  }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
+    // Caso crítico: Asegurar tool_call_id para el resultado (tool)
+    if (role === 'tool') {
+      msg.tool_call_id = m.tool_call_id || m.id || m.toolCallId;
+      // Backup: si no hay ID, buscar el del último assistant con tool_calls
+      if (!msg.tool_call_id) {
+        for (let i = cleaned.length - 1; i >= 0; i--) {
+          if (cleaned[i].tool_calls?.[0]?.id) {
+            msg.tool_call_id = cleaned[i].tool_calls[0].id;
+            break;
+          }
+        }
+      }
+    }
+
+    if (m.name) msg.name = m.name;
+
+    // Evitar mensajes de asistente vacíos sin herramientas
+    if (role === 'assistant' && !msg.content && !msg.tool_calls) continue;
+
+    cleaned.push(msg);
+  }
+
+  return cleaned.filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
 
 const normalizeTools = (tools: any[]): any[] | undefined => {
@@ -102,8 +131,7 @@ const handleChatCompletions = async (c: any) => {
     body = await c.req.json();
     console.log(`\n--- [DEBUG] INCOMING REQUEST ---`);
     console.log(`Path: ${c.req.path}`);
-    // No logueamos todo el body para no saturar si es muy largo, solo un resumen
-    console.log(`Model requested: ${body.model}`);
+    console.log(`Model: ${body.model}`);
   } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
