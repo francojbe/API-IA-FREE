@@ -77,7 +77,15 @@ const handleChatCompletions = async (c: any) => {
   // Lógica de extracción ultra-flexible para n8n
   let rawMessages = body.messages || [];
 
-  // Si no hay messages, probamos con 'prompt' (común en algunos nodos)
+  // CASO n8n: Usa 'input' en lugar de 'messages'
+  if (rawMessages.length === 0 && Array.isArray(body.input)) {
+    rawMessages = body.input.map((m: any) => ({
+      role: m.role || 'user',
+      content: m.content || m.text || ''
+    }));
+  }
+
+  // Si no hay nada, probamos con 'prompt'
   if (rawMessages.length === 0 && body.prompt) {
     rawMessages = [{ role: 'user', content: body.prompt }];
   }
