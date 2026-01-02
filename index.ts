@@ -18,6 +18,7 @@ const lastResortService = process.env.OPENROUTER_API_KEY ? openRouterService : n
 
 const app = new Hono();
 
+// Logger profesional para depuración en tiempo real
 app.use('*', async (c, next) => {
   const start = Date.now();
   await next();
@@ -27,6 +28,7 @@ app.use('*', async (c, next) => {
 
 app.use('*', cors());
 
+// Middleware de Autenticación
 app.use('/v1/*', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
   if (!authSecret) return await next();
@@ -41,27 +43,32 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
-// Limpieza de mensajes con normalización de roles (Human -> user, etc)
+// Normalizador de mensajes súper-robusto para n8n
 const cleanMessages = (messages: any[]): ChatMessage[] => {
   if (!Array.isArray(messages)) return [];
   return messages.map(m => {
-    let role = (m.role || '').toLowerCase();
-
-    // Normalización de dialectos de n8n/LangChain
+    // Detectar rol y normalizar a minúsculas
+    let role = (m.role || m.type || 'user').toLowerCase();
     if (role === 'human' || role === 'user') role = 'user';
+    else if (role === 'ai' || role === 'assistant' || role === 'model') role = 'assistant';
     else if (role === 'system') role = 'system';
     else if (role === 'tool') role = 'tool';
-    else role = 'assistant'; // Default para model, chat, etc.
 
+    // Extraer contenido de texto (aplanar arrays de n8n)
     let content = "";
-    if (typeof m.content === 'string') content = m.content;
-    else if (Array.isArray(m.content)) content = m.content.map((v: any) => v.text || "").join(' ');
-    else if (m.text) content = m.text;
+    if (typeof m.content === 'string') {
+      content = m.content;
+    } else if (Array.isArray(m.content)) {
+      content = m.content.map((v: any) => v.text || v.text?.content || "").join(' ');
+    } else if (m.text) {
+      content = typeof m.text === 'string' ? m.text : (m.text.content || "");
+    }
 
     const cleaned: ChatMessage = { role: role as any, content };
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
     if (m.tool_call_id) cleaned.tool_call_id = m.tool_call_id;
     if (m.name) cleaned.name = m.name;
+
     return cleaned;
   }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
@@ -70,8 +77,10 @@ const normalizeTools = (tools: any[]): any[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => {
     if (t.type === 'function' && t.function?.name) return t;
-    if (t.name) return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} } } };
-    return t;
+    const name = t.name || t.function?.name;
+    const desc = t.description || t.function?.description || '';
+    const params = t.parameters || t.function?.parameters || { type: 'object', properties: {} };
+    return { type: 'function', function: { name, description: desc, parameters: params } };
   }).filter(t => t.function?.name);
 };
 
@@ -80,14 +89,13 @@ const handleChatCompletions = async (c: any) => {
   try { body = await c.req.json(); } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
-  let rawMessages = body.messages || body.input || [];
-
-  const messages = cleanMessages(rawMessages);
+  const messages = cleanMessages(body.messages || body.input || []);
   const tools = normalizeTools(body.tools);
   const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
   if (body.stream) {
+    // ... [Streaming logic maintained, focusing on non-streaming for the tool fix] ...
     return streamText(c, async (stream) => {
       for (const service of rotationServices) {
         try {
@@ -134,7 +142,7 @@ const handleChatCompletions = async (c: any) => {
         const isTool = toolCalls.length > 0;
         console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
-        // Crear objeto de uso compatible con ambos formatos (snake_case y camelCase)
+        // Usage con camelCase para n8n
         const usage = {
           prompt_tokens: messages.length * 10,
           completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
@@ -144,38 +152,51 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        const response: any = {
-          id: requestId,
-          object: isResponsesApi ? 'response' : 'chat.completion',
-          model: requestedModel,
-          created: Math.floor(Date.now() / 1000),
-          status: isTool ? 'requires_action' : 'completed',
-          choices: [{
-            index: 0,
-            message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-            finish_reason: isTool ? 'tool_calls' : 'stop'
-          }],
-          output: [{
-            type: 'message',
-            role: 'assistant',
-            content: fullText ? [{ type: 'text', text: fullText }] : [],
-            tool_calls: isTool ? toolCalls : undefined
-          }],
-          usage: usage,
-          tokenUsageEstimate: usage // Para n8n/LangChain específicamente
-        };
-
-        if (isTool && isResponsesApi) {
-          response.required_action = {
-            type: 'submit_tool_outputs',
-            submit_tool_outputs: { tool_calls: toolCalls }
-          };
+        if (isResponsesApi) {
+          // FORMATO RESPONSES API (n8n v2 mejorado)
+          return c.json({
+            id: requestId,
+            object: 'response',
+            status: isTool ? 'requires_action' : 'completed',
+            model: requestedModel,
+            choices: [{ // Algunas versiones de n8n lo siguen necesitando
+              index: 0,
+              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+              finish_reason: isTool ? 'tool_calls' : 'stop'
+            }],
+            output: [{
+              type: 'message',
+              status: 'completed',
+              role: 'assistant',
+              content: fullText ? [{ type: 'text', text: fullText }] : [],
+              tool_calls: isTool ? toolCalls : undefined,
+              finish_reason: isTool ? 'tool_calls' : 'stop' // CRÍTICO: Añadido finish_reason aquí
+            }],
+            required_action: isTool ? {
+              type: 'submit_tool_outputs',
+              submit_tool_outputs: { tool_calls: toolCalls }
+            } : undefined,
+            usage: usage,
+            usage_metadata: usage // Alias extra
+          });
+        } else {
+          // FORMATO CHAT COMPLETION
+          return c.json({
+            id: requestId,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: requestedModel,
+            choices: [{
+              index: 0,
+              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+              finish_reason: isTool ? 'tool_calls' : 'stop'
+            }],
+            usage: usage
+          });
         }
-
-        return c.json(response);
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-    return c.json({ error: 'Servicios no disponibles' }, 503);
+    return c.json({ error: 'Fallo total de red' }, 503);
   }
 };
 
@@ -203,6 +224,7 @@ app.get('/health', (c) => c.json({ status: 'ok', services: rotationServices.map(
 if (typeof Bun !== 'undefined') {
   const { serveStatic } = await import('hono/bun');
   app.use('/*', serveStatic({ root: './public' }));
+  console.log(`Server running on Bun port ${process.env.PORT ?? 3000}`);
 } else {
   const { serveStatic } = await import('@hono/node-server/serve-static');
   app.use('/*', serveStatic({ root: './public' }));
