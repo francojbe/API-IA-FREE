@@ -26,16 +26,22 @@ const app = new Hono();
 // Middlewares
 app.use('*', cors());
 
-// Servir archivos estáticos (Frontend)
-if (typeof Bun !== 'undefined') {
-  const { serveStatic } = await import('hono/bun');
-  app.use('/*', serveStatic({ root: './public' }));
-} else {
-  const { serveStatic } = await import('@hono/node-server/serve-static');
-  app.use('/*', serveStatic({ root: './public' }));
-}
+// --- ENDPOINTS COMPATIBLES CON OPENAI ---
 
-// Endpoint compatible con OpenAI (Para n8n, Cursor, TypingMind, etc.)
+// 1. Listar modelos (Evita errores de validación en n8n/Cursor)
+app.get('/v1/models', (c) => {
+  return c.json({
+    object: 'list',
+    data: [
+      { id: 'multi-ia-proxy', object: 'model', created: Date.now(), owned_by: 'antigravity' }
+    ]
+  });
+});
+
+// 2. Base endpoint (Salud)
+app.get('/v1', (c) => c.text('OpenAI-Compatible Proxy Active'));
+
+// 3. Chat Completions
 app.post('/v1/chat/completions', async (c) => {
   const body = await c.req.json();
   const messages = body.messages as ChatMessage[];
@@ -44,15 +50,10 @@ app.post('/v1/chat/completions', async (c) => {
   if (streamRequested) {
     return streamText(c, async (stream) => {
       let success = false;
-      let usedService = '';
-
-      // Usamos la misma lógica de failover que el endpoint original
       for (const service of rotationServices) {
         try {
           const aiStream = await service.chat(messages);
-          usedService = service.name;
           for await (const chunk of aiStream) {
-            // Formato de streaming de OpenAI (SSE)
             const data = JSON.stringify({
               choices: [{ delta: { content: chunk } }]
             });
@@ -68,7 +69,6 @@ app.post('/v1/chat/completions', async (c) => {
       if (!success && lastResortService) {
         try {
           const aiStream = await lastResortService.chat(messages);
-          usedService = lastResortService.name;
           for await (const chunk of aiStream) {
             const data = JSON.stringify({
               choices: [{ delta: { content: chunk } }]
@@ -84,7 +84,6 @@ app.post('/v1/chat/completions', async (c) => {
       await stream.write('data: [DONE]\n\n');
     });
   } else {
-    // Si no se pide streaming, recolectamos todo y respondemos un JSON normal
     let fullText = '';
     let success = false;
     for (const service of rotationServices) {
@@ -110,28 +109,35 @@ app.post('/v1/chat/completions', async (c) => {
   }
 });
 
-// Middleware de autenticación simple
+// Middlewares de autenticación
+app.use('/v1/*', async (c, next) => {
+  const authSecret = process.env.AUTH_SECRET;
+  if (authSecret) {
+    const authHeader = c.req.header('Authorization');
+    const apiKey = authHeader ? authHeader.replace('Bearer ', '') : c.req.header('x-api-key');
+    if (apiKey !== authSecret) return c.json({ error: 'Unauthorized' }, 401);
+  }
+  await next();
+});
+
+// --- FIN ENDPOINTS OPENAI ---
+
+// Servir archivos estáticos (Frontend)
+if (typeof Bun !== 'undefined') {
+  const { serveStatic } = await import('hono/bun');
+  app.use('/*', serveStatic({ root: './public' }));
+} else {
+  const { serveStatic } = await import('@hono/node-server/serve-static');
+  app.use('/*', serveStatic({ root: './public' }));
+}
+
+// Middleware de autenticación para ruta /chat
 app.use('/chat', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
   if (authSecret) {
     const apiKey = c.req.header('x-api-key');
     if (apiKey !== authSecret) {
       return c.json({ error: 'Unauthorized: Invalid API Key' }, 401);
-    }
-  }
-  await next();
-});
-
-// Alias para el middleware en la ruta OpenAI-compatible
-app.use('/v1/*', async (c, next) => {
-  const authSecret = process.env.AUTH_SECRET;
-  if (authSecret) {
-    // n8n envía la clave como "Authorization: Bearer Clave"
-    const authHeader = c.req.header('Authorization');
-    const apiKey = authHeader ? authHeader.replace('Bearer ', '') : c.req.header('x-api-key');
-
-    if (apiKey !== authSecret) {
-      return c.json({ error: 'Unauthorized' }, 401);
     }
   }
   await next();
