@@ -157,30 +157,33 @@ const handleChatCompletions = async (c: any) => {
         const usage = {
           prompt_tokens: messages.length * 10,
           completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
-          total_tokens: (messages.length * 10) + 50
+          total_tokens: (messages.length * 10) + 50,
+          promptTokens: messages.length * 10,
+          completionTokens: isTool ? 50 : Math.ceil(fullText.length / 4),
+          totalTokens: (messages.length * 10) + 50
         };
 
-        // Formato UNIVERSAL: El campo 'output' DEBE ser un ARRAY para n8n v1/v2/v3
+        // Formato UNIVERSAL
         const response: any = {
           id: requestId,
           object: isResponsesApi ? 'response' : 'chat.completion',
           model: requestedModel,
           created: Math.floor(Date.now() / 1000),
-          status: 'completed',
+          // Si hay herramientas, el status DEBE ser requires_action para que n8n las ejecute
+          status: isTool ? 'requires_action' : 'completed',
 
           // Compatibilidad con Chat Completions (OpenAI)
           choices: [{
             index: 0,
             message: {
               role: 'assistant',
-              content: fullText || null,
+              content: fullText || "",
               tool_calls: isTool ? toolCalls : undefined
             },
             finish_reason: isTool ? 'tool_calls' : 'stop'
           }],
 
           // Compatibilidad con Responses API (n8n Agent)
-          // Importante: Usamos un ARRAY para evitar el error "not iterable"
           output: [{
             type: 'message',
             role: 'assistant',
@@ -201,7 +204,7 @@ const handleChatCompletions = async (c: any) => {
           };
         }
 
-        console.log(`--- [DEBUG] OUTGOING RESPONSE (UNIVERSAL ARRAY) ---`);
+        console.log(`--- [DEBUG] OUTGOING RESPONSE (STATUS: ${response.status}) ---`);
         return c.json(response);
       } catch (e) {
         console.error(`[FAIL] ${service.name}: ${e}`);
