@@ -163,31 +163,29 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        // Formato UNIVERSAL
+        // Formato ULTRA-COMPATIBLE
         const response: any = {
           id: requestId,
           object: isResponsesApi ? 'response' : 'chat.completion',
           model: requestedModel,
           created: Math.floor(Date.now() / 1000),
-          // Si hay herramientas, el status DEBE ser requires_action para que n8n las ejecute
           status: isTool ? 'requires_action' : 'completed',
 
-          // Compatibilidad con Chat Completions (OpenAI)
           choices: [{
             index: 0,
             message: {
               role: 'assistant',
-              content: fullText || "",
+              content: fullText || (isTool ? null : ""),
               tool_calls: isTool ? toolCalls : undefined
             },
             finish_reason: isTool ? 'tool_calls' : 'stop'
           }],
 
-          // Compatibilidad con Responses API (n8n Agent)
           output: [{
+            id: 'msg_' + Math.random().toString(36).substring(7),
             type: 'message',
             role: 'assistant',
-            status: 'completed',
+            status: isTool ? 'requires_action' : 'completed',
             content: fullText ? [{ type: 'text', text: fullText }] : [],
             tool_calls: isTool ? toolCalls : undefined,
             finish_reason: isTool ? 'tool_calls' : 'stop'
@@ -204,7 +202,8 @@ const handleChatCompletions = async (c: any) => {
           };
         }
 
-        console.log(`--- [DEBUG] OUTGOING RESPONSE (STATUS: ${response.status}) ---`);
+        console.log(`--- [DEBUG] OUTGOING RESPONSE (Status: ${response.status}) ---`);
+        console.log(JSON.stringify(response).substring(0, 400) + "...");
         return c.json(response);
       } catch (e) {
         console.error(`[FAIL] ${service.name}: ${e}`);
