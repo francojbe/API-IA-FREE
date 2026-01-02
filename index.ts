@@ -147,18 +147,16 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        // Construir el array 'output' siguiendo el estándar EXACTO que n8n/LangChain espera
+        // Construir el array 'output' siguiendo el estándar PLANO que n8n/LangChain espera
         const outputItems: any[] = [];
 
-        // n8n espera un item de tipo 'message' que contenga tanto el texto como las herramientas
+        // n8n espera que las propiedades estén en la raíz del objeto del output
         outputItems.push({
           type: 'message',
           status: 'completed',
-          message: {
-            role: 'assistant',
-            content: fullText ? [{ type: 'text', text: fullText }] : [],
-            tool_calls: isTool ? toolCalls : undefined
-          }
+          role: 'assistant',
+          content: fullText ? [{ type: 'text', text: fullText }] : [],
+          tool_calls: isTool ? toolCalls : undefined
         });
 
         const response: any = {
