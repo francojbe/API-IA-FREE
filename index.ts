@@ -48,35 +48,22 @@ const cleanMessages = (messages: any[]): ChatMessage[] => {
     if (role === 'chat' || role === 'model') role = 'assistant';
 
     const cleaned: ChatMessage = { role: role as any, content: "" };
-
-    if (typeof m.content === 'string') {
-      cleaned.content = m.content;
-    } else if (Array.isArray(m.content)) {
-      cleaned.content = m.content.map((v: any) => v.text || JSON.stringify(v)).join(' ');
-    }
+    if (typeof m.content === 'string') cleaned.content = m.content;
+    else if (Array.isArray(m.content)) cleaned.content = m.content.map((v: any) => v.text || JSON.stringify(v)).join(' ');
 
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
     if (m.tool_call_id) cleaned.tool_call_id = m.tool_call_id;
     if (m.name) cleaned.name = m.name;
 
     return cleaned;
-  }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls);
+  }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
 
 const normalizeTools = (tools: any[]): any[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => {
     if (t.type === 'function' && t.function?.name) return t;
-    if (t.name) {
-      return {
-        type: 'function',
-        function: {
-          name: t.name,
-          description: t.description || '',
-          parameters: t.parameters || t.arguments || { type: 'object', properties: {} }
-        }
-      };
-    }
+    if (t.name) return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || t.arguments || { type: 'object', properties: {} } } };
     return t;
   }).filter(t => t.function?.name);
 };
@@ -102,10 +89,6 @@ const handleChatCompletions = async (c: any) => {
   const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
-  if (messages.length === 0) {
-    return c.json({ id: requestId, object: 'chat.completion', choices: [{ message: { role: 'assistant', content: 'Esperando mensaje.' }, index: 0 }] });
-  }
-
   if (body.stream) {
     return streamText(c, async (stream) => {
       for (const service of rotationServices) {
@@ -116,8 +99,7 @@ const handleChatCompletions = async (c: any) => {
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
               model: requestedModel,
-              choices: [{ delta, index: 0, finish_reason: null }],
-              output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
+              choices: [{ delta, index: 0, finish_reason: null }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
@@ -132,8 +114,7 @@ const handleChatCompletions = async (c: any) => {
     const toolCallMap = new Map<number, any>();
 
     for (const service of rotationServices) {
-      fullText = '';
-      toolCallMap.clear();
+      fullText = ''; toolCallMap.clear();
       try {
         const aiStream = await service.chat(messages, tools);
         for await (const delta of aiStream) {
@@ -141,9 +122,7 @@ const handleChatCompletions = async (c: any) => {
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
-              if (!toolCallMap.has(idx)) {
-                toolCallMap.set(idx, { id: tc.id || `call_${Math.random().toString(36).substring(7)}`, type: 'function', function: { name: '', arguments: '' } });
-              }
+              if (!toolCallMap.has(idx)) toolCallMap.set(idx, { id: tc.id || `call_${Math.random().toString(36).substring(7)}`, type: 'function', function: { name: '', arguments: '' } });
               const entry = toolCallMap.get(idx);
               if (tc.id) entry.id = tc.id;
               if (tc.function?.name) entry.function.name += tc.function.name;
@@ -155,11 +134,17 @@ const handleChatCompletions = async (c: any) => {
         if (fullText || toolCalls.length > 0) {
           usedService = service.name;
           const isTool = toolCalls.length > 0;
-
           console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
-          // RESPUESTA UNIVERSAL: Incluye ambos formatos para máxima compatibilidad
-          const response = {
+          const output: any[] = [];
+          if (fullText) output.push({ type: 'message', role: 'assistant', content: [{ type: 'text', text: fullText }] });
+          if (isTool) {
+            for (const tc of toolCalls) {
+              output.push({ id: tc.id, type: 'tool_call', tool_call: tc }); // Formato Agente
+            }
+          }
+
+          const response: any = {
             id: requestId,
             object: isResponsesApi ? 'response' : 'chat.completion',
             created: Math.floor(Date.now() / 1000),
@@ -168,21 +153,18 @@ const handleChatCompletions = async (c: any) => {
             choices: [{
               index: 0,
               message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-              logprobs: null,
               finish_reason: isTool ? 'tool_calls' : 'stop'
             }],
-            output: [{
-              type: 'message',
-              role: 'assistant',
-              content: fullText ? [{ type: 'text', text: fullText }] : [],
-              tool_calls: isTool ? toolCalls : undefined
-            }],
-            usage: {
-              prompt_tokens: messages.length * 10,
-              completion_tokens: Math.ceil(fullText.length / 4) + (toolCalls.length * 20),
-              total_tokens: (messages.length * 10) + Math.ceil(fullText.length / 4) + (toolCalls.length * 20)
-            }
+            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
           };
+
+          if (isResponsesApi) {
+            response.output = output;
+            if (isTool) {
+              response.required_action = { type: 'submit_tool_outputs', submit_tool_outputs: { tool_calls: toolCalls } };
+            }
+          }
+
           return c.json(response);
         }
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
