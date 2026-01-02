@@ -81,6 +81,28 @@ const cleanMessages = (messages: ChatMessage[]): ChatMessage[] => {
   }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls);
 };
 
+// Función para asegurar que las herramientas tengan el formato exacto que Groq/Cerebras piden
+const normalizeTools = (tools: any[]): any[] => {
+  if (!Array.isArray(tools)) return undefined as any;
+  return tools.map(t => {
+    // Si ya tiene el formato correcto, lo dejamos
+    if (t.type === 'function' && t.function?.name) return t;
+
+    // Si viene "plano" (común en algunas integraciones), lo envolvemos
+    if (t.name && (t.parameters || t.arguments)) {
+      return {
+        type: 'function',
+        function: {
+          name: t.name,
+          description: t.description || '',
+          parameters: t.parameters || t.arguments
+        }
+      };
+    }
+    return t;
+  }).filter(t => t.function?.name);
+};
+
 // POST /v1/chat/completions (Soporta streaming y no-streaming)
 const handleChatCompletions = async (c: any) => {
   let body: any;
@@ -101,7 +123,7 @@ const handleChatCompletions = async (c: any) => {
   if (rawMessages.length === 0 && body.prompt) rawMessages = [{ role: 'user', content: body.prompt }];
 
   const messages = cleanMessages(rawMessages);
-  const tools = body.tools;
+  const tools = normalizeTools(body.tools); // NORMALIZAR HERRAMIENTAS AQUÍ
   const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
