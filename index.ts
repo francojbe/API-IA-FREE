@@ -74,11 +74,21 @@ const normalizeTools = (tools: any[]): any[] | undefined => {
 
 const handleChatCompletions = async (c: any) => {
   let body: any;
-  try { body = await c.req.json(); } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
+  try {
+    body = await c.req.json();
+    console.log(`\n--- [DEBUG] INCOMING REQUEST ---`);
+    console.log(`Path: ${c.req.path}`);
+    console.log(`Body: ${JSON.stringify(body, null, 2)}`);
+  } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
-  const messages = cleanMessages(body.messages || body.input || []);
+  let rawMessages = body.messages || body.input || [];
+
+  const messages = cleanMessages(rawMessages);
+  console.log(`Cleaned Messages: ${JSON.stringify(messages, null, 2)}`);
+
   const tools = normalizeTools(body.tools);
+  const requestedModel = body.model || 'multi-ia-proxy';
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
   if (body.stream) {
@@ -91,17 +101,17 @@ const handleChatCompletions = async (c: any) => {
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
               choices: isResponsesApi ? undefined : [{ delta, index: 0, finish_reason: null }],
-              output: isResponsesApi ? [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }] : undefined
+              output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
           await stream.write(`data: [DONE]\n\n`);
           return;
-        } catch (e) { }
+        } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
       }
     });
   } else {
-    for (const service of [...rotationServices, openRouterService]) {
+    for (const service of [...rotationServices, lastResortService]) {
       if (!service) continue;
       try {
         let fullText = '';
@@ -126,50 +136,55 @@ const handleChatCompletions = async (c: any) => {
         if (!fullText && toolCalls.length === 0) continue;
 
         const isTool = toolCalls.length > 0;
-        console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
+        console.log(`[SERVICE SUCCESS] (${service.name}) ToolCalls Found: ${toolCalls.length}`);
 
-        if (isResponsesApi) {
-          // CLON EXACTO DE OPENAI RESPONSES API
-          const response: any = {
-            id: requestId,
-            object: 'response',
-            status: isTool ? 'requires_action' : 'completed',
-            model: body.model || 'multi-ia-proxy',
-            output: [{
-              type: 'message',
-              role: 'assistant',
-              content: fullText ? [{ type: 'text', text: fullText }] : [],
-              tool_calls: isTool ? toolCalls : undefined
-            }],
-            usage: { promptTokens: messages.length * 10, completionTokens: 50, totalTokens: 100 }
+        const usage = {
+          prompt_tokens: messages.length * 10,
+          completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
+          total_tokens: (messages.length * 10) + 50,
+          promptTokens: messages.length * 10,
+          completionTokens: isTool ? 50 : Math.ceil(fullText.length / 4),
+          totalTokens: (messages.length * 10) + 50
+        };
+
+        const response: any = {
+          id: requestId,
+          object: isResponsesApi ? 'response' : 'chat.completion',
+          model: requestedModel,
+          created: Math.floor(Date.now() / 1000),
+          status: isTool ? 'requires_action' : 'completed',
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+            finish_reason: isTool ? 'tool_calls' : 'stop'
+          }],
+          output: [{
+            type: 'message',
+            role: 'assistant',
+            content: fullText ? [{ type: 'text', text: fullText }] : [],
+            tool_calls: isTool ? toolCalls : undefined,
+            status: 'completed',
+            finish_reason: isTool ? 'tool_calls' : 'stop'
+          }],
+          usage: usage,
+          tokenUsageEstimate: usage
+        };
+
+        if (isTool && isResponsesApi) {
+          response.required_action = {
+            type: 'submit_tool_outputs',
+            submit_tool_outputs: { tool_calls: toolCalls }
           };
-
-          if (isTool) {
-            response.required_action = {
-              type: 'submit_tool_outputs',
-              submit_tool_outputs: { tool_calls: toolCalls }
-            };
-          }
-
-          return c.json(response);
-        } else {
-          // FORMATO CHAT CLÁSICO
-          return c.json({
-            id: requestId,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: body.model || 'multi-ia-proxy',
-            choices: [{
-              index: 0,
-              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-              finish_reason: isTool ? 'tool_calls' : 'stop'
-            }],
-            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-          });
         }
+
+        console.log(`--- [DEBUG] OUTGOING RESPONSE ---`);
+        console.log(JSON.stringify(response, null, 2));
+        console.log(`---------------------------------\n`);
+
+        return c.json(response);
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-    return c.json({ error: 'Service Unavailable' }, 503);
+    return c.json({ error: 'Servicios no disponibles' }, 503);
   }
 };
 
