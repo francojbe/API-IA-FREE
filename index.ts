@@ -66,15 +66,37 @@ const cleanMessages = (messages: ChatMessage[]): ChatMessage[] => {
 
 // POST /v1/chat/completions (Soporta streaming y no-streaming)
 const handleChatCompletions = async (c: any) => {
-  const body = await c.req.json();
-  const rawMessages = body.messages as ChatMessage[];
-  const messages = cleanMessages(rawMessages || []);
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch (e) {
+    console.error(`[ERROR] No se pudo parsear el JSON de la petición`);
+    return c.json({ error: 'Invalid JSON' }, 400);
+  }
+
+  // Lógica de extracción ultra-flexible para n8n
+  let rawMessages = body.messages || [];
+
+  // Si no hay messages, probamos con 'prompt' (común en algunos nodos)
+  if (rawMessages.length === 0 && body.prompt) {
+    rawMessages = [{ role: 'user', content: body.prompt }];
+  }
+
+  const messages = cleanMessages(rawMessages);
   const modelId = 'multi-ia-proxy';
   const requestId = 'chatcmpl-' + Math.random().toString(36).substring(7);
 
+  // Si después de todo sigue vacío, logueamos el cuerpo COMPLETO para investigar
   if (messages.length === 0) {
-    console.warn(`[WARN] Petición sin mensajes válida desde ${c.req.path}`);
-    return c.json({ error: 'No valid messages provided' }, 400);
+    console.warn(`[DEBUG] Petición recibida sin mensajes. Cuerpo completo: ${JSON.stringify(body)}`);
+    // En lugar de error, devolvemos un saludo de prueba para que n8n no se rompa
+    return c.json({
+      id: requestId,
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: modelId,
+      choices: [{ message: { role: 'assistant', content: 'Conexión exitosa. Esperando mensajes...' }, finish_reason: 'stop', index: 0 }]
+    });
   }
 
   if (body.stream) {
