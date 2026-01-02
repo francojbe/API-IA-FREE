@@ -163,7 +163,7 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        // Formato ULTRA-COMPATIBLE
+        // --- CONSTRUCCIÓN DE RESPUESTA BASADA EN OPENAI RESPONSES API ---
         const response: any = {
           id: requestId,
           object: isResponsesApi ? 'response' : 'chat.completion',
@@ -171,39 +171,61 @@ const handleChatCompletions = async (c: any) => {
           created: Math.floor(Date.now() / 1000),
           status: isTool ? 'requires_action' : 'completed',
 
+          // 1. Compatibilidad Chat Completions (Nodos estándar)
           choices: [{
             index: 0,
             message: {
               role: 'assistant',
-              content: fullText || (isTool ? null : ""),
+              content: fullText || null,
               tool_calls: isTool ? toolCalls : undefined
             },
             finish_reason: isTool ? 'tool_calls' : 'stop'
           }],
 
-          output: [{
-            id: 'msg_' + Math.random().toString(36).substring(7),
-            type: 'message',
-            role: 'assistant',
-            status: isTool ? 'requires_action' : 'completed',
-            content: fullText ? [{ type: 'text', text: fullText }] : [],
-            tool_calls: isTool ? toolCalls : undefined,
-            finish_reason: isTool ? 'tool_calls' : 'stop'
-          }],
+          // 2. Compatibilidad Responses API (Nodos AI Agent de n8n)
+          // El array output debe contener items independientes
+          output: [],
 
           usage: usage,
           tokenUsageEstimate: usage
         };
 
+        // Añadimos el mensaje al output (siempre va un mensaje, aunque esté vacío)
+        response.output.push({
+          id: 'msg_' + Math.random().toString(36).substring(7),
+          type: 'message',
+          role: 'assistant',
+          content: fullText ? [{ type: 'text', text: fullText }] : [],
+          status: 'completed'
+        });
+
+        // IMPORTANTE: En la Responses API, las herramientas son items TOP-LEVEL en el output
         if (isTool) {
+          for (const tc of toolCalls) {
+            response.output.push({
+              id: tc.id || 'call_' + Math.random().toString(36).substring(7),
+              type: 'function_call',
+              status: 'requires_action',
+              name: tc.function.name,
+              arguments: tc.function.arguments
+            });
+          }
+
+          // Bloque de acción requerida (Obligatorio en esta API)
           response.required_action = {
             type: 'submit_tool_outputs',
-            submit_tool_outputs: { tool_calls: toolCalls }
+            submit_tool_outputs: {
+              tool_calls: toolCalls.map(tc => ({
+                id: tc.id,
+                type: 'function',
+                function: tc.function
+              }))
+            }
           };
         }
 
         console.log(`--- [DEBUG] OUTGOING RESPONSE (Status: ${response.status}) ---`);
-        console.log(JSON.stringify(response).substring(0, 400) + "...");
+        console.log(`Output items: ${response.output.length}`);
         return c.json(response);
       } catch (e) {
         console.error(`[FAIL] ${service.name}: ${e}`);
