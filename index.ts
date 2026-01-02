@@ -8,7 +8,6 @@ import { geminiService } from './services/gemini';
 import { openRouterService } from './services/openrouter';
 import type { AIService, ChatMessage } from './types';
 
-// Configuración de servicios
 const availableServices: AIService[] = [];
 if (process.env.GROQ_API_KEY) availableServices.push(groqService);
 if (process.env.CEREBRAS_API_KEY) availableServices.push(cerebrasService);
@@ -28,7 +27,6 @@ app.use('*', async (c, next) => {
 
 app.use('*', cors());
 
-// Middleware de Autenticación para /v1
 app.use('/v1/*', async (c, next) => {
   const authSecret = process.env.AUTH_SECRET;
   if (!authSecret) return await next();
@@ -43,21 +41,18 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
-// Limpieza profunda de mensajes para n8n / LangChain
 const cleanMessages = (messages: any[]): ChatMessage[] => {
   if (!Array.isArray(messages)) return [];
   return messages.map(m => {
     let role = m.role || 'user';
     if (role === 'chat' || role === 'model') role = 'assistant';
 
-    const cleaned: ChatMessage = { role, content: "" };
+    const cleaned: ChatMessage = { role: role as any, content: "" };
 
     if (typeof m.content === 'string') {
       cleaned.content = m.content;
     } else if (Array.isArray(m.content)) {
       cleaned.content = m.content.map((v: any) => v.text || JSON.stringify(v)).join(' ');
-    } else if (m.content) {
-      cleaned.content = JSON.stringify(m.content);
     }
 
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
@@ -65,21 +60,20 @@ const cleanMessages = (messages: any[]): ChatMessage[] => {
     if (m.name) cleaned.name = m.name;
 
     return cleaned;
-  }).filter(m => m.content?.trim() !== '' || m.tool_calls);
+  }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls);
 };
 
-// Normalización de Tools (Wrapping en 'function')
 const normalizeTools = (tools: any[]): any[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => {
     if (t.type === 'function' && t.function?.name) return t;
-    if (t.name && (t.parameters || t.arguments)) {
+    if (t.name) {
       return {
         type: 'function',
         function: {
           name: t.name,
           description: t.description || '',
-          parameters: t.parameters || t.arguments
+          parameters: t.parameters || t.arguments || { type: 'object', properties: {} }
         }
       };
     }
@@ -109,8 +103,7 @@ const handleChatCompletions = async (c: any) => {
   const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
   if (messages.length === 0) {
-    if (isResponsesApi) return c.json({ id: requestId, object: 'response', status: 'completed', output: [{ type: 'message', content: [{ type: 'text', text: 'Esperando mensaje.' }] }] });
-    return c.json({ id: requestId, object: 'chat.completion', choices: [{ message: { role: 'assistant', content: 'Conexión activa.' }, index: 0 }], usage: { total_tokens: 0 } });
+    return c.json({ id: requestId, object: 'chat.completion', choices: [{ message: { role: 'assistant', content: 'Esperando mensaje.' }, index: 0 }] });
   }
 
   if (body.stream) {
@@ -119,11 +112,12 @@ const handleChatCompletions = async (c: any) => {
         try {
           const aiStream = await service.chat(messages, tools);
           for await (const delta of aiStream) {
-            let data = isResponsesApi ? JSON.stringify({
-              id: requestId, object: 'response.chunk', status: 'in_progress',
+            const data = JSON.stringify({
+              id: requestId,
+              object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
+              model: requestedModel,
+              choices: [{ delta, index: 0, finish_reason: null }],
               output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
-            }) : JSON.stringify({
-              id: requestId, object: 'chat.completion.chunk', model: requestedModel, choices: [{ delta, index: 0, finish_reason: null }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
@@ -148,11 +142,7 @@ const handleChatCompletions = async (c: any) => {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
               if (!toolCallMap.has(idx)) {
-                toolCallMap.set(idx, {
-                  id: tc.id || `call_${Math.random().toString(36).substring(7)}`,
-                  type: 'function',
-                  function: { name: '', arguments: '' }
-                });
+                toolCallMap.set(idx, { id: tc.id || `call_${Math.random().toString(36).substring(7)}`, type: 'function', function: { name: '', arguments: '' } });
               }
               const entry = toolCallMap.get(idx);
               if (tc.id) entry.id = tc.id;
@@ -164,28 +154,40 @@ const handleChatCompletions = async (c: any) => {
         const toolCalls = Array.from(toolCallMap.values());
         if (fullText || toolCalls.length > 0) {
           usedService = service.name;
-          const status = toolCalls.length > 0 ? (isResponsesApi ? 'requires_action' : 'stop') : 'stop';
+          const isTool = toolCalls.length > 0;
 
-          console.log(`[SUCCESS] (${isResponsesApi ? 'API Resp' : 'API Chat'}) Service: ${usedService} ${toolCalls.length > 0 ? `(Tools: ${toolCalls.length})` : ''}`);
+          console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
-          if (isResponsesApi) {
-            return c.json({
-              id: requestId, object: 'response', status: toolCalls.length > 0 ? 'requires_action' : 'completed',
-              output: [{ type: 'message', role: 'assistant', content: fullText ? [{ type: 'text', text: fullText }] : [], tool_calls: toolCalls.length > 0 ? toolCalls : undefined }],
-              usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-            });
-          }
-
-          return c.json({
-            id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: requestedModel,
-            choices: [{ index: 0, message: { role: 'assistant', content: fullText || null, tool_calls: toolCalls.length > 0 ? toolCalls : undefined }, logprobs: null, finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop' }],
-            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-          });
+          // RESPUESTA UNIVERSAL: Incluye ambos formatos para máxima compatibilidad
+          const response = {
+            id: requestId,
+            object: isResponsesApi ? 'response' : 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: requestedModel,
+            status: isTool ? 'requires_action' : 'completed',
+            choices: [{
+              index: 0,
+              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+              logprobs: null,
+              finish_reason: isTool ? 'tool_calls' : 'stop'
+            }],
+            output: [{
+              type: 'message',
+              role: 'assistant',
+              content: fullText ? [{ type: 'text', text: fullText }] : [],
+              tool_calls: isTool ? toolCalls : undefined
+            }],
+            usage: {
+              prompt_tokens: messages.length * 10,
+              completion_tokens: Math.ceil(fullText.length / 4) + (toolCalls.length * 20),
+              total_tokens: (messages.length * 10) + Math.ceil(fullText.length / 4) + (toolCalls.length * 20)
+            }
+          };
+          return c.json(response);
         }
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-
-    return c.json({ error: 'No se pudo obtener respuesta de ninguna IA.' }, 503);
+    return c.json({ error: 'Error de servicios IA' }, 503);
   }
 };
 
@@ -216,9 +218,7 @@ if (typeof Bun !== 'undefined') {
   const { serveStatic } = await import('@hono/node-server/serve-static');
   app.use('/*', serveStatic({ root: './public' }));
   const { serve } = await import('@hono/node-server');
-  const port = Number(process.env.PORT) || 3000;
-  console.log(`Server running on Node.js port ${port}`);
-  serve({ fetch: app.fetch, port });
+  serve({ fetch: app.fetch, port: Number(process.env.PORT) || 3000 });
 }
 
 export default app;
