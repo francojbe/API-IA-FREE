@@ -50,18 +50,36 @@ const cleanMessages = (messages: any): ChatMessage[] => {
     if (typeof m === 'string') return { role: 'user' as const, content: m };
 
     let role = (m.role || m.type || 'user').toLowerCase();
+
+    // Mapeo especializado para n8n Agent y Responses API
     if (role === 'human' || role === 'user') role = 'user';
-    else if (role === 'ai' || role === 'assistant' || role === 'model') role = 'assistant';
+    else if (role === 'ai' || role === 'assistant' || role === 'model' || role === 'function_call') role = 'assistant';
+    else if (role === 'tool' || role === 'function_call_output') role = 'tool';
+    else if (role === 'system') role = 'system';
+    else role = 'user'; // Fallback seguro
 
     let content = "";
     if (typeof m.content === 'string') content = m.content;
-    else if (Array.isArray(m.content)) content = m.content.map((v: any) => v.text || "").join(' ');
+    else if (Array.isArray(m.content)) {
+      content = m.content.map((v: any) => {
+        if (typeof v === 'string') return v;
+        return v.text || v.input || JSON.stringify(v);
+      }).join(' ');
+    }
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
-    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = JSON.stringify(m);
+    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || JSON.stringify(m);
 
     const cleaned: ChatMessage = { role: role as any, content };
+
+    // Preservar metadatos de herramientas para el proveedor original
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
-    if (m.tool_call_id) cleaned.tool_call_id = m.tool_call_id;
+    if (m.tool_call_id || m.id) cleaned.tool_call_id = m.tool_call_id || m.id;
+
+    // Si el rol es 'tool' y no hay ID, Groq/OpenAI fallarán
+    if (role === 'tool' && !cleaned.tool_call_id) {
+      cleaned.tool_call_id = 'call_' + Math.random().toString(36).substring(7);
+    }
+
     if (m.name) cleaned.name = m.name;
     return cleaned;
   }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
