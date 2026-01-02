@@ -41,9 +41,14 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
-const cleanMessages = (messages: any[]): ChatMessage[] => {
-  if (!Array.isArray(messages)) return [];
-  return messages.map(m => {
+const cleanMessages = (messages: any): ChatMessage[] => {
+  if (!messages) return [];
+  const msgsArray = Array.isArray(messages) ? messages : [messages];
+
+  return msgsArray.map(m => {
+    // Si m es solo un string, convertirlo a un mensaje de usuario
+    if (typeof m === 'string') return { role: 'user' as const, content: m };
+
     let role = (m.role || m.type || 'user').toLowerCase();
     if (role === 'human' || role === 'user') role = 'user';
     else if (role === 'ai' || role === 'assistant' || role === 'model') role = 'assistant';
@@ -52,6 +57,7 @@ const cleanMessages = (messages: any[]): ChatMessage[] => {
     if (typeof m.content === 'string') content = m.content;
     else if (Array.isArray(m.content)) content = m.content.map((v: any) => v.text || "").join(' ');
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
+    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = JSON.stringify(m);
 
     const cleaned: ChatMessage = { role: role as any, content };
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
@@ -78,14 +84,15 @@ const handleChatCompletions = async (c: any) => {
     body = await c.req.json();
     console.log(`\n--- [DEBUG] INCOMING REQUEST ---`);
     console.log(`Path: ${c.req.path}`);
-    console.log(`Body: ${JSON.stringify(body, null, 2)}`);
+    // No logueamos todo el body para no saturar si es muy largo, solo un resumen
+    console.log(`Model requested: ${body.model}`);
   } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
   let rawMessages = body.messages || body.input || [];
 
   const messages = cleanMessages(rawMessages);
-  console.log(`Cleaned Messages: ${JSON.stringify(messages, null, 2)}`);
+  console.log(`Cleaned Messages Count: ${messages.length}`);
 
   const tools = normalizeTools(body.tools);
   const requestedModel = body.model || 'multi-ia-proxy';
@@ -101,7 +108,12 @@ const handleChatCompletions = async (c: any) => {
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
               choices: isResponsesApi ? undefined : [{ delta, index: 0, finish_reason: null }],
-              output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
+              output: [{
+                type: 'message',
+                role: 'assistant',
+                content: delta.content ? [{ type: 'text', text: delta.content }] : [],
+                tool_calls: delta.tool_calls
+              }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
@@ -116,6 +128,7 @@ const handleChatCompletions = async (c: any) => {
       try {
         let fullText = '';
         const toolCallMap = new Map<number, any>();
+        console.log(`[ATTEMPT] Using service: ${service.name}`);
         const aiStream = await service.chat(messages, tools);
 
         for await (const delta of aiStream) {
@@ -133,7 +146,10 @@ const handleChatCompletions = async (c: any) => {
         }
 
         const toolCalls = Array.from(toolCallMap.values());
-        if (!fullText && toolCalls.length === 0) continue;
+        if (!fullText && toolCalls.length === 0) {
+          console.log(`[EMPTY RESPONSE] ${service.name} returned nothing, trying next...`);
+          continue;
+        }
 
         const isTool = toolCalls.length > 0;
         console.log(`[SERVICE SUCCESS] (${service.name}) ToolCalls Found: ${toolCalls.length}`);
@@ -141,21 +157,18 @@ const handleChatCompletions = async (c: any) => {
         const usage = {
           prompt_tokens: messages.length * 10,
           completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
-          total_tokens: (messages.length * 10) + 50,
-          promptTokens: messages.length * 10,
-          completionTokens: isTool ? 50 : Math.ceil(fullText.length / 4),
-          totalTokens: (messages.length * 10) + 50
+          total_tokens: (messages.length * 10) + 50
         };
 
-        // Formato UNIVERSAL: Enviamos un objeto que funciona tanto para n8n v1 como v2/v3
+        // Formato UNIVERSAL: El campo 'output' DEBE ser un ARRAY para n8n v1/v2/v3
         const response: any = {
           id: requestId,
           object: isResponsesApi ? 'response' : 'chat.completion',
           model: requestedModel,
           created: Math.floor(Date.now() / 1000),
-          status: isTool ? 'requires_action' : 'completed',
+          status: 'completed',
 
-          // Compatibilidad con Chat Completions
+          // Compatibilidad con Chat Completions (OpenAI)
           choices: [{
             index: 0,
             message: {
@@ -167,15 +180,15 @@ const handleChatCompletions = async (c: any) => {
           }],
 
           // Compatibilidad con Responses API (n8n Agent)
-          // Transformamos el array en un OBJETO para evitar el error "not iterable"
-          output: {
+          // Importante: Usamos un ARRAY para evitar el error "not iterable"
+          output: [{
             type: 'message',
             role: 'assistant',
             status: 'completed',
             content: fullText ? [{ type: 'text', text: fullText }] : [],
             tool_calls: isTool ? toolCalls : undefined,
             finish_reason: isTool ? 'tool_calls' : 'stop'
-          },
+          }],
 
           usage: usage,
           tokenUsageEstimate: usage
@@ -188,10 +201,12 @@ const handleChatCompletions = async (c: any) => {
           };
         }
 
-        console.log(`--- [DEBUG] OUTGOING RESPONSE (UNIVERSAL) ---`);
-        console.log(JSON.stringify(response, null, 2));
+        console.log(`--- [DEBUG] OUTGOING RESPONSE (UNIVERSAL ARRAY) ---`);
         return c.json(response);
-      } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
+      } catch (e) {
+        console.error(`[FAIL] ${service.name}: ${e}`);
+        // Si hay un error, el loop 'for' continúa automáticamente al siguiente servicio
+      }
     }
     return c.json({ error: 'Servicios no disponibles' }, 503);
   }
