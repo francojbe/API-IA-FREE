@@ -147,46 +147,60 @@ const handleChatCompletions = async (c: any) => {
           totalTokens: (messages.length * 10) + 50
         };
 
-        // Construir el array 'output' siguiendo el estándar PLANO que n8n/LangChain espera
-        const outputItems: any[] = [];
-
-        // n8n espera que las propiedades estén en la raíz del objeto del output
-        outputItems.push({
-          type: 'message',
-          status: 'completed',
-          role: 'assistant',
-          content: fullText ? [{ type: 'text', text: fullText }] : [],
-          tool_calls: isTool ? toolCalls : undefined
-        });
-
-        const response: any = {
-          id: requestId,
-          object: isResponsesApi ? 'response' : 'chat.completion',
-          model: requestedModel,
-          created: Math.floor(Date.now() / 1000),
-          status: isTool ? 'requires_action' : 'completed',
-          choices: [{
-            index: 0,
-            message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-            finish_reason: isTool ? 'tool_calls' : 'stop'
-          }],
-          output: isResponsesApi ? outputItems : undefined,
-          usage: usage,
-          tokenUsageEstimate: usage
-        };
-
-        if (isTool && isResponsesApi) {
-          response.required_action = {
-            type: 'submit_tool_outputs',
-            submit_tool_outputs: { tool_calls: toolCalls }
+        if (isResponsesApi) {
+          // FORMATO RESPONSES API (n8n Agent / LangChain)
+          // Muy importante: n8n espera que el 'content' esté dentro de 'message' si el tipo es 'message'
+          // Y espera 'finish_reason' dentro de ese objeto message.
+          const response: any = {
+            id: requestId,
+            object: 'response',
+            status: isTool ? 'requires_action' : 'completed',
+            model: requestedModel,
+            created: Math.floor(Date.now() / 1000),
+            output: [{
+              type: 'message',
+              status: 'completed',
+              message: {
+                role: 'assistant',
+                content: fullText ? [{ type: 'text', text: fullText }] : [],
+                tool_calls: isTool ? toolCalls : undefined,
+                finish_reason: isTool ? 'tool_calls' : 'stop'
+              }
+            }],
+            usage: usage,
+            tokenUsageEstimate: usage
           };
+
+          if (isTool) {
+            response.required_action = {
+              type: 'submit_tool_outputs',
+              submit_tool_outputs: { tool_calls: toolCalls }
+            };
+          }
+
+          console.log(`--- [DEBUG] OUTGOING RESPONSE (RESPONSES API) ---`);
+          console.log(JSON.stringify(response, null, 2));
+          return c.json(response);
+
+        } else {
+          // FORMATO CHAT COMPLETIONS (Standard OpenAI)
+          const response = {
+            id: requestId,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: requestedModel,
+            choices: [{
+              index: 0,
+              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+              finish_reason: isTool ? 'tool_calls' : 'stop'
+            }],
+            usage: usage
+          };
+
+          console.log(`--- [DEBUG] OUTGOING RESPONSE (CHAT API) ---`);
+          console.log(JSON.stringify(response, null, 2));
+          return c.json(response);
         }
-
-        console.log(`--- [DEBUG] OUTGOING RESPONSE ---`);
-        console.log(JSON.stringify(response, null, 2));
-        console.log(`---------------------------------\n`);
-
-        return c.json(response);
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
     return c.json({ error: 'Servicios no disponibles' }, 503);
