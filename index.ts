@@ -45,71 +45,75 @@ app.get('/v1/models', (c) => c.json({
 const cleanMessages = (messages: any): ChatMessage[] => {
   if (!messages) return [];
   const msgsArray = Array.isArray(messages) ? messages : [messages];
-  const merged: ChatMessage[] = [];
+  const cleaned: ChatMessage[] = [];
 
   for (const m of msgsArray) {
     if (!m) continue;
 
-    // Normalizar Rol
+    // Si m es solo un string, es un mensaje de usuario
+    if (typeof m === 'string') {
+      cleaned.push({ role: 'user', content: m });
+      continue;
+    }
+
     let role = (m.role || m.type || 'user').toLowerCase();
+
+    // Mapeo especializado para roles de n8n
     if (role === 'human' || role === 'user') role = 'user';
     else if (role === 'ai' || role === 'assistant' || role === 'model' || role === 'function_call') role = 'assistant';
     else if (role === 'tool' || role === 'function_call_output') role = 'tool';
     else if (role === 'system') role = 'system';
     else role = 'user';
 
-    // Extraer Contenido
     let content = "";
-    if (typeof m === 'string') content = m;
-    else if (typeof m.content === 'string') content = m.content;
+    if (typeof m.content === 'string') content = m.content;
     else if (Array.isArray(m.content)) {
       content = m.content.map((v: any) => (typeof v === 'string' ? v : (v.text || v.input || JSON.stringify(v)))).join(' ');
     }
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
     else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || m.arguments || JSON.stringify(m);
 
-    // Lógica de Fusión (Merging)
-    const last = merged[merged.length - 1];
+    const msg: ChatMessage = { role: role as any, content };
 
+    // Caso crítico: Reconstruir tool_calls para el asistente
     if (role === 'assistant') {
-      // Si el anterior también era assistant, fusionamos en lugar de crear uno nuevo
-      if (last && last.role === 'assistant') {
-        if (content) last.content = (last.content ? last.content + "\n" : "") + content;
-
-        // Fusionar tool_calls
-        const newCalls = m.tool_calls || (m.name && m.arguments ? [{
+      if (m.tool_calls) {
+        msg.tool_calls = m.tool_calls;
+      } else if (m.name && m.arguments) {
+        // Viene de un item 'function_call' de n8n Responses API
+        msg.tool_calls = [{
           id: m.id || m.tool_call_id || 'call_' + Math.random().toString(36).substring(7),
           type: 'function',
           function: { name: m.name, arguments: m.arguments }
-        }] : []);
-
-        if (newCalls.length > 0) {
-          last.tool_calls = [...(last.tool_calls || []), ...newCalls];
-        }
-        continue;
+        }];
+        msg.content = "";
       }
+    }
 
-      // Si es un assistant nuevo pero es una llamada a función de n8n
-      const tool_calls = m.tool_calls || (m.name && m.arguments ? [{
-        id: m.id || m.tool_call_id || 'call_' + Math.random().toString(36).substring(7),
-        type: 'function',
-        function: { name: m.name, arguments: m.arguments }
-      }] : undefined);
+    // Caso crítico: Asegurar tool_call_id para el resultado (tool)
+    if (role === 'tool') {
+      msg.tool_call_id = m.tool_call_id || m.id || m.toolCallId;
+      // Backup: si no hay ID, buscar el del último assistant con tool_calls
+      if (!msg.tool_call_id) {
+        for (let i = cleaned.length - 1; i >= 0; i--) {
+          if (cleaned[i].tool_calls?.[0]?.id) {
+            msg.tool_call_id = cleaned[i].tool_calls[0].id;
+            break;
+          }
+        }
+      }
+    }
 
-      merged.push({ role: 'assistant', content: content || "", tool_calls });
-    }
-    else if (role === 'tool') {
-      const tool_call_id = m.tool_call_id || m.id || m.toolCallId;
-      merged.push({ role: 'tool', content: content || "OK", tool_call_id });
-    }
-    else {
-      merged.push({ role: role as any, content });
-    }
+    if (m.name) msg.name = m.name;
+
+    // Evitar mensajes de asistente vacíos sin herramientas
+    if (role === 'assistant' && !msg.content && !msg.tool_calls) continue;
+
+    cleaned.push(msg);
   }
 
-  console.log(`🔍 [HISTORIAL] Estructura: ${merged.map(m => m.role + (m.tool_calls ? '(tools)' : '')).join(' -> ')}`);
-  return merged.filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
-};,
+  return cleaned.filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
+};
 
 const normalizeTools = (tools: any[]): any[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
