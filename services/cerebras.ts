@@ -5,22 +5,28 @@ let cerebras: Cerebras;
 
 export const cerebrasService: AIService = {
   name: 'Cerebras',
-  async chat(messages: ChatMessage[]) {
+  async chat(messages: ChatMessage[], tools?: any[]) {
     if (!cerebras) {
       cerebras = new Cerebras();
     }
-    const stream = await cerebras.chat.completions.create({
+
+    const options: any = {
       messages: messages as any,
-      model: 'zai-glm-4.6',
+      model: 'llama3.1-70b',
       stream: true,
       max_completion_tokens: 40960,
       temperature: 0.6,
-      top_p: 0.95
-    });
+    };
+
+    if (tools && tools.length > 0) {
+      options.tools = tools;
+    }
+
+    const stream = await cerebras.chat.completions.create(options);
 
     return (async function* () {
       for await (const chunk of stream) {
-        yield (chunk as any).choices[0]?.delta?.content || ''
+        yield (chunk as any).choices[0]?.delta || {}
       }
     })()
   }

@@ -8,13 +8,12 @@ const FREE_MODELS = [
 
 export const openRouterService: AIService = {
     name: 'OpenRouter (Last Resort)',
-    async chat(messages: ChatMessage[]) {
+    async chat(messages: ChatMessage[], tools?: any[]) {
         const apiKey = process.env.OPENROUTER_API_KEY;
         if (!apiKey) throw new Error('OpenRouter API Key no configurada');
 
         let lastError: any;
 
-        // El propio servicio de OpenRouter intentará sus modelos gratuitos uno por uno
         for (const model of FREE_MODELS) {
             try {
                 console.log(`[OpenRouter Fallback] Intentando con modelo: ${model}`);
@@ -24,12 +23,12 @@ export const openRouterService: AIService = {
                     headers: {
                         "Authorization": `Bearer ${apiKey}`,
                         "Content-Type": "application/json",
-                        "HTTP-Referer": "http://localhost:3000", // Opcional para OpenRouter ranking
                         "X-Title": "Multi-IA Proxy",
                     },
                     body: JSON.stringify({
                         "model": model,
                         "messages": messages,
+                        "tools": tools,
                         "stream": true
                     })
                 });
@@ -43,34 +42,34 @@ export const openRouterService: AIService = {
                 const decoder = new TextDecoder();
 
                 return (async function* () {
+                    let buffer = "";
                     while (true) {
                         const { done, value } = await reader!.read();
                         if (done) break;
 
-                        const chunk = decoder.decode(value);
-                        const lines = chunk.split('\n').filter(line => line.trim() !== '');
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || "";
 
                         for (const line of lines) {
                             if (line.includes('data: [DONE]')) return;
                             if (line.startsWith('data: ')) {
                                 try {
                                     const data = JSON.parse(line.replace('data: ', ''));
-                                    const content = data.choices[0]?.delta?.content || '';
-                                    if (content) yield content;
-                                } catch (e) {
-                                    // Ignorar errores de parseo intermedios
-                                }
+                                    const delta = data.choices[0]?.delta || {};
+                                    if (delta) yield delta;
+                                } catch (e) { }
                             }
                         }
                     }
                 })();
             } catch (error) {
-                console.error(`Fallo en modelo ${model} de OpenRouter:`, error instanceof Error ? error.message : error);
+                console.error(`Fallo en modelo ${model} de OpenRouter:`, error);
                 lastError = error;
-                continue; // Probar el siguiente modelo gratuito de la lista
+                continue;
             }
         }
 
-        throw lastError || new Error('Todos los modelos gratuitos de OpenRouter fallaron');
+        throw lastError || new Error('Todos los modelos fallaron');
     }
 }
