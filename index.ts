@@ -78,25 +78,32 @@ const handleChatCompletions = async (c: any) => {
   let body: any;
   try { body = await c.req.json(); } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
+  const isResponsesApi = c.req.path.includes('/responses');
+
   // Extracción ultra-flexible
   let rawMessages = body.messages || [];
   if (rawMessages.length === 0 && Array.isArray(body.input)) {
     rawMessages = body.input.map((m: any) => ({
       role: m.role || (m.type === 'message' ? 'user' : 'system'),
-      content: m.content || m.text || ''
+      content: Array.isArray(m.content) ? m.content.map((c: any) => c.text || '').join(' ') : (m.content || m.text || '')
     }));
   }
   if (rawMessages.length === 0 && body.prompt) rawMessages = [{ role: 'user', content: body.prompt }];
 
   const messages = cleanMessages(rawMessages);
   const requestedModel = body.model || 'multi-ia-proxy';
-  const requestId = 'chatcmpl-' + Math.random().toString(36).substring(7);
+  const requestId = (isResponsesApi ? 'resp_' : 'chatcmpl-') + Math.random().toString(36).substring(7);
 
   if (messages.length === 0) {
-    console.warn(`[DEBUG] No se detectaron mensajes en n8n. Enviando respuesta de prueba.`);
+    if (isResponsesApi) {
+      return c.json({
+        id: requestId, object: 'response', status: 'completed',
+        output: [{ type: 'message', content: [{ type: 'text', text: 'Conexión activa.' }] }]
+      });
+    }
     return c.json({
       id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: requestedModel,
-      choices: [{ message: { role: 'assistant', content: 'Conexión activa. Por favor envía un mensaje.' }, finish_reason: 'stop', index: 0 }],
+      choices: [{ message: { role: 'assistant', content: 'Conexión activa.' }, finish_reason: 'stop', index: 0 }],
       usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
     });
   }
@@ -108,7 +115,10 @@ const handleChatCompletions = async (c: any) => {
         try {
           const aiStream = await service.chat(messages);
           for await (const chunk of aiStream) {
-            const data = JSON.stringify({
+            let data = isResponsesApi ? JSON.stringify({
+              id: requestId, object: 'response.chunk', status: 'in_progress',
+              output: [{ type: 'message', content: [{ type: 'text', text: chunk }] }]
+            }) : JSON.stringify({
               id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000),
               model: requestedModel, choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
             });
@@ -118,20 +128,12 @@ const handleChatCompletions = async (c: any) => {
           break;
         } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
       }
-      if (!success && lastResortService) {
-        try {
-          const aiStream = await lastResortService.chat(messages);
-          for await (const chunk of aiStream) {
-            const data = JSON.stringify({
-              id: requestId, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000),
-              model: requestedModel, choices: [{ delta: { content: chunk }, index: 0, finish_reason: null }]
-            });
-            await stream.write(`data: ${data}\n\n`);
-          }
-          success = true;
-        } catch (e) { }
-      }
-      await stream.write(`data: ${JSON.stringify({ id: requestId, object: 'chat.completion.chunk', model: requestedModel, choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] })}\n\n`);
+
+      const finalData = isResponsesApi
+        ? { id: requestId, object: 'response.chunk', status: 'completed' }
+        : { id: requestId, object: 'chat.completion.chunk', model: requestedModel, choices: [{ delta: {}, index: 0, finish_reason: 'stop' }] };
+
+      await stream.write(`data: ${JSON.stringify(finalData)}\n\n`);
       await stream.write('data: [DONE]\n\n');
     });
   } else {
@@ -152,34 +154,25 @@ const handleChatCompletions = async (c: any) => {
       } catch (e) { }
     }
 
-    if (!fullText) fullText = "Lo siento, todos los servicios de IA están ocupados. Intenta de nuevo en unos segundos.";
+    if (!fullText) fullText = "Servicio no disponible.";
+    const pTokens = Math.max(1, messages.length * 10);
+    const cTokens = Math.ceil(fullText.length / 4);
 
-    // Cálculo preciso de tokens (LangChain es estricto con los enteros y la suma total)
-    const promptTokens = Math.max(1, messages.length * 10);
-    const completionTokens = Math.ceil(fullText.length / 4);
-    const totalTokens = promptTokens + completionTokens;
+    console.log(`[SUCCESS] (${isResponsesApi ? 'API Resp' : 'API Chat'}). Service: ${usedService}`);
 
-    const responseBody = {
-      id: requestId,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: requestedModel,
-      choices: [{
-        index: 0,
-        message: { role: 'assistant', content: fullText },
-        logprobs: null, // Obligatorio para algunas versiones de LangChain
-        finish_reason: 'stop'
-      }],
-      usage: {
-        prompt_tokens: promptTokens,
-        completion_tokens: completionTokens,
-        total_tokens: totalTokens
-      }
-    };
+    if (isResponsesApi) {
+      return c.json({
+        id: requestId, object: 'response', status: 'completed',
+        output: [{ type: 'message', role: 'assistant', content: [{ type: 'text', text: fullText }] }],
+        usage: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: pTokens + cTokens }
+      });
+    }
 
-    console.log(`[SUCCESS] Respondido con ${usedService}. Tokens: ${totalTokens}`);
-
-    return c.json(responseBody);
+    return c.json({
+      id: requestId, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model: requestedModel,
+      choices: [{ index: 0, message: { role: 'assistant', content: fullText }, logprobs: null, finish_reason: 'stop' }],
+      usage: { prompt_tokens: pTokens, completion_tokens: cTokens, total_tokens: pTokens + cTokens }
+    });
   }
 };
 
