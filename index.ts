@@ -41,13 +41,18 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
+// Limpieza de mensajes con normalización de roles (Human -> user, etc)
 const cleanMessages = (messages: any[]): ChatMessage[] => {
   if (!Array.isArray(messages)) return [];
   return messages.map(m => {
-    let role = m.role || 'user';
-    if (role === 'chat' || role === 'model') role = 'assistant';
+    let role = (m.role || '').toLowerCase();
 
-    // Si el contenido viene como array de n8n, lo aplanamos
+    // Normalización de dialectos de n8n/LangChain
+    if (role === 'human' || role === 'user') role = 'user';
+    else if (role === 'system') role = 'system';
+    else if (role === 'tool') role = 'tool';
+    else role = 'assistant'; // Default para model, chat, etc.
+
     let content = "";
     if (typeof m.content === 'string') content = m.content;
     else if (Array.isArray(m.content)) content = m.content.map((v: any) => v.text || "").join(' ');
@@ -75,18 +80,7 @@ const handleChatCompletions = async (c: any) => {
   try { body = await c.req.json(); } catch (e) { return c.json({ error: 'Invalid JSON' }, 400); }
 
   const isResponsesApi = c.req.path.includes('/responses');
-  console.log(`[IN] Path: ${c.req.path} | Mode: ${isResponsesApi ? 'Responses (Agent)' : 'Chat (Standard)'}`);
-
-  let rawMessages = body.messages || [];
-  if (rawMessages.length === 0 && Array.isArray(body.input)) {
-    rawMessages = body.input.map((m: any) => ({
-      role: m.role || (m.type === 'message' ? 'user' : 'system'),
-      content: m.content || m.text || '',
-      tool_calls: m.tool_calls,
-      tool_call_id: m.tool_call_id
-    }));
-  }
-  if (rawMessages.length === 0 && body.prompt) rawMessages = [{ role: 'user', content: body.prompt }];
+  let rawMessages = body.messages || body.input || [];
 
   const messages = cleanMessages(rawMessages);
   const tools = normalizeTools(body.tools);
@@ -102,9 +96,8 @@ const handleChatCompletions = async (c: any) => {
             const data = JSON.stringify({
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
-              model: requestedModel,
-              choices: isResponsesApi ? undefined : [{ delta, index: 0, finish_reason: null }],
-              output: isResponsesApi ? [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }] : undefined
+              choices: [{ delta, index: 0, finish_reason: null }],
+              output: [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }]
             });
             await stream.write(`data: ${data}\n\n`);
           }
@@ -114,7 +107,7 @@ const handleChatCompletions = async (c: any) => {
       }
     });
   } else {
-    for (const service of [...rotationServices, openRouterService]) { // Fallback directo
+    for (const service of [...rotationServices, openRouterService]) {
       if (!service) continue;
       try {
         let fullText = '';
@@ -136,60 +129,53 @@ const handleChatCompletions = async (c: any) => {
         }
 
         const toolCalls = Array.from(toolCallMap.values());
-
-        // Si no hay respuesta de ningún tipo, pasamos al siguiente servicio
-        if (!fullText && toolCalls.length === 0) {
-          console.warn(`[EMPTY] ${service.name} devolvió respuesta vacía. Saltando...`);
-          continue;
-        }
+        if (!fullText && toolCalls.length === 0) continue;
 
         const isTool = toolCalls.length > 0;
         console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
-        if (isResponsesApi) {
-          // RESPUESTA DE AGENTE PURA (n8n v2/v3)
-          return c.json({
-            id: requestId,
-            object: 'response',
-            status: isTool ? 'requires_action' : 'completed',
-            model: requestedModel,
-            output: [{
-              type: 'message',
-              role: 'assistant',
-              content: fullText ? [{ type: 'text', text: fullText }] : [],
-              tool_calls: isTool ? toolCalls : undefined
-            }],
-            required_action: isTool ? {
-              type: 'submit_tool_outputs',
-              submit_tool_outputs: { tool_calls: toolCalls }
-            } : undefined,
-            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-          });
-        } else {
-          // RESPUESTA CHAT CLÁSICA
-          return c.json({
-            id: requestId,
-            object: 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: requestedModel,
-            choices: [{
-              index: 0,
-              message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
-              finish_reason: isTool ? 'tool_calls' : 'stop'
-            }],
-            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-          });
+        // Crear objeto de uso compatible con ambos formatos (snake_case y camelCase)
+        const usage = {
+          prompt_tokens: messages.length * 10,
+          completion_tokens: isTool ? 50 : Math.ceil(fullText.length / 4),
+          total_tokens: (messages.length * 10) + 50,
+          promptTokens: messages.length * 10,
+          completionTokens: isTool ? 50 : Math.ceil(fullText.length / 4),
+          totalTokens: (messages.length * 10) + 50
+        };
+
+        const response: any = {
+          id: requestId,
+          object: isResponsesApi ? 'response' : 'chat.completion',
+          model: requestedModel,
+          created: Math.floor(Date.now() / 1000),
+          status: isTool ? 'requires_action' : 'completed',
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+            finish_reason: isTool ? 'tool_calls' : 'stop'
+          }],
+          output: [{
+            type: 'message',
+            role: 'assistant',
+            content: fullText ? [{ type: 'text', text: fullText }] : [],
+            tool_calls: isTool ? toolCalls : undefined
+          }],
+          usage: usage,
+          tokenUsageEstimate: usage // Para n8n/LangChain específicamente
+        };
+
+        if (isTool && isResponsesApi) {
+          response.required_action = {
+            type: 'submit_tool_outputs',
+            submit_tool_outputs: { tool_calls: toolCalls }
+          };
         }
+
+        return c.json(response);
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-
-    // Respuesta de emergencia si todo falla
-    return c.json({
-      id: requestId,
-      object: 'response',
-      status: 'completed',
-      output: [{ type: 'message', content: [{ type: 'text', text: "Lo siento, las IA están saturadas. Por favor reintenta en unos segundos." }] }]
-    }, 200); // 200 para no romper el flujo de n8n
+    return c.json({ error: 'Servicios no disponibles' }, 503);
   }
 };
 
@@ -201,8 +187,7 @@ app.post('/chat', async (c) => {
     const body: any = await c.req.json();
     const messages = cleanMessages(body.messages || []);
     return streamText(c, async (stream) => {
-      for (const service of [...rotationServices, openRouterService]) {
-        if (!service) continue;
+      for (const service of rotationServices) {
         try {
           const aiStream = await service.chat(messages);
           for await (const delta of aiStream) if (delta.content) await stream.write(delta.content);
@@ -210,7 +195,7 @@ app.post('/chat', async (c) => {
         } catch (e) { }
       }
     });
-  } catch (e) { return c.json({ error: 'Invalid Request' }, 400); }
+  } catch (e) { return c.json({ error: 'Invalid' }, 400); }
 });
 
 app.get('/health', (c) => c.json({ status: 'ok', services: rotationServices.map(s => s.name) }));
@@ -218,7 +203,6 @@ app.get('/health', (c) => c.json({ status: 'ok', services: rotationServices.map(
 if (typeof Bun !== 'undefined') {
   const { serveStatic } = await import('hono/bun');
   app.use('/*', serveStatic({ root: './public' }));
-  console.log(`Server running on Bun port ${process.env.PORT ?? 3000}`);
 } else {
   const { serveStatic } = await import('@hono/node-server/serve-static');
   app.use('/*', serveStatic({ root: './public' }));
