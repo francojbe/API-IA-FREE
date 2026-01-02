@@ -41,24 +41,17 @@ app.get('/v1/models', (c) => c.json({
   data: [{ id: 'multi-ia-proxy', object: 'model', created: 1677610602, owned_by: 'antigravity' }]
 }));
 
-// Limpieza de mensajes con soporte para roles de herramientas
 const cleanMessages = (messages: any[]): ChatMessage[] => {
   if (!Array.isArray(messages)) return [];
   return messages.map(m => {
     let role = m.role || 'user';
     if (role === 'chat' || role === 'model') role = 'assistant';
-
     const cleaned: ChatMessage = { role: role as any, content: "" };
-    if (typeof m.content === 'string') {
-      cleaned.content = m.content;
-    } else if (Array.isArray(m.content)) {
-      cleaned.content = m.content.map((v: any) => v.text || JSON.stringify(v)).join(' ');
-    }
-
+    if (typeof m.content === 'string') cleaned.content = m.content;
+    else if (Array.isArray(m.content)) cleaned.content = m.content.map((v: any) => v.text || JSON.stringify(v)).join(' ');
     if (m.tool_calls) cleaned.tool_calls = m.tool_calls;
     if (m.tool_call_id) cleaned.tool_call_id = m.tool_call_id;
     if (m.name) cleaned.name = m.name;
-
     return cleaned;
   }).filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
@@ -67,7 +60,7 @@ const normalizeTools = (tools: any[]): any[] | undefined => {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
   return tools.map(t => {
     if (t.type === 'function' && t.function?.name) return t;
-    if (t.name) return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || t.arguments || { type: 'object', properties: {} } } };
+    if (t.name) return { type: 'function', function: { name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} } } };
     return t;
   }).filter(t => t.function?.name);
 };
@@ -103,7 +96,8 @@ const handleChatCompletions = async (c: any) => {
               id: requestId,
               object: isResponsesApi ? 'response.chunk' : 'chat.completion.chunk',
               model: requestedModel,
-              choices: [{ delta, index: 0, finish_reason: null }]
+              choices: isResponsesApi ? undefined : [{ delta, index: 0, finish_reason: null }],
+              output: isResponsesApi ? [{ type: 'message', content: delta.content ? [{ type: 'text', text: delta.content }] : [], tool_calls: delta.tool_calls }] : undefined
             });
             await stream.write(`data: ${data}\n\n`);
           }
@@ -135,44 +129,47 @@ const handleChatCompletions = async (c: any) => {
 
         const toolCalls = Array.from(toolCallMap.values());
         if (fullText || toolCalls.length > 0) {
-          console.log(`[SUCCESS] (${service.name}) ${toolCalls.length > 0 ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
-
-          const response: any = {
-            id: requestId,
-            object: isResponsesApi ? 'response' : 'chat.completion',
-            created: Math.floor(Date.now() / 1000),
-            model: requestedModel,
-            choices: [{
-              index: 0,
-              message: { role: 'assistant', content: fullText || null, tool_calls: toolCalls.length > 0 ? toolCalls : undefined },
-              finish_reason: toolCalls.length > 0 ? 'tool_calls' : 'stop'
-            }],
-            usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
-          };
+          const isTool = toolCalls.length > 0;
+          console.log(`[SUCCESS] (${service.name}) ${isTool ? `Tools: ${toolCalls.length}` : `Chars: ${fullText.length}`}`);
 
           if (isResponsesApi) {
-            response.status = toolCalls.length > 0 ? 'requires_action' : 'completed';
-            // Formato exacto requerido por n8n: Un solo objeto 'message' con tool_calls
-            response.output = [{
-              type: 'message',
-              role: 'assistant',
-              content: fullText ? [{ type: 'text', text: fullText }] : [],
-              tool_calls: toolCalls.length > 0 ? toolCalls : undefined
-            }];
-
-            if (toolCalls.length > 0) {
-              response.required_action = {
+            // FORMATO AGENTE PURO (v1/responses)
+            return c.json({
+              id: requestId,
+              object: 'response',
+              status: isTool ? 'requires_action' : 'completed',
+              model: requestedModel,
+              output: [{
+                type: 'message',
+                role: 'assistant',
+                content: fullText ? [{ type: 'text', text: fullText }] : [],
+                tool_calls: isTool ? toolCalls : undefined
+              }],
+              required_action: isTool ? {
                 type: 'submit_tool_outputs',
                 submit_tool_outputs: { tool_calls: toolCalls }
-              };
-            }
+              } : undefined,
+              usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
+            });
+          } else {
+            // FORMATO CHAT CLÁSICO (v1/chat/completions)
+            return c.json({
+              id: requestId,
+              object: 'chat.completion',
+              created: Math.floor(Date.now() / 1000),
+              model: requestedModel,
+              choices: [{
+                index: 0,
+                message: { role: 'assistant', content: fullText || null, tool_calls: isTool ? toolCalls : undefined },
+                finish_reason: isTool ? 'tool_calls' : 'stop'
+              }],
+              usage: { prompt_tokens: messages.length * 10, completion_tokens: 50, total_tokens: 100 }
+            });
           }
-
-          return c.json(response);
         }
       } catch (e) { console.error(`[FAIL] ${service.name}: ${e}`); }
     }
-    return c.json({ error: 'Error de servicios IA' }, 503);
+    return c.json({ error: 'Fallo total de servicios IA' }, 503);
   }
 };
 
