@@ -56,12 +56,26 @@ app.get('/v1/models', (c) => {
   });
 });
 
+// Función para limpiar mensajes de n8n/LangChain
+const cleanMessages = (messages: ChatMessage[]): ChatMessage[] => {
+  return messages.map(m => ({
+    role: m.role || 'user',
+    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+  })).filter(m => m.content && m.content.trim() !== '');
+};
+
 // POST /v1/chat/completions (Soporta streaming y no-streaming)
 const handleChatCompletions = async (c: any) => {
   const body = await c.req.json();
-  const messages = body.messages as ChatMessage[];
+  const rawMessages = body.messages as ChatMessage[];
+  const messages = cleanMessages(rawMessages || []);
   const modelId = 'multi-ia-proxy';
   const requestId = 'chatcmpl-' + Math.random().toString(36).substring(7);
+
+  if (messages.length === 0) {
+    console.warn(`[WARN] Petición sin mensajes válida desde ${c.req.path}`);
+    return c.json({ error: 'No valid messages provided' }, 400);
+  }
 
   if (body.stream) {
     return streamText(c, async (stream) => {
@@ -82,7 +96,7 @@ const handleChatCompletions = async (c: any) => {
           success = true;
           break;
         } catch (e) {
-          console.error(`[FAIL] ${service.name} falló en modo OpenAI`);
+          console.error(`[FAIL] ${service.name}:`, e instanceof Error ? e.message : e);
         }
       }
 
@@ -100,7 +114,9 @@ const handleChatCompletions = async (c: any) => {
             await stream.write(`data: ${data}\n\n`);
           }
           success = true;
-        } catch (e) { }
+        } catch (e) {
+          console.error(`[CRITICAL] Error en Fallback final:`, e instanceof Error ? e.message : e);
+        }
       }
 
       const finalData = JSON.stringify({
@@ -122,7 +138,9 @@ const handleChatCompletions = async (c: any) => {
         for await (const chunk of aiStream) fullText += chunk;
         success = true;
         break;
-      } catch (e) { }
+      } catch (e) {
+        console.error(`[FAIL NON-STREAM] ${service.name}:`, e instanceof Error ? e.message : e);
+      }
     }
 
     if (!success && lastResortService) {
@@ -130,7 +148,9 @@ const handleChatCompletions = async (c: any) => {
         const aiStream = await lastResortService.chat(messages);
         for await (const chunk of aiStream) fullText += chunk;
         success = true;
-      } catch (e) { }
+      } catch (e) {
+        console.error(`[CRITICAL NON-STREAM] Fallback:`, e instanceof Error ? e.message : e);
+      }
     }
 
     return c.json({
