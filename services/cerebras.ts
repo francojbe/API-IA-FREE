@@ -11,7 +11,7 @@ export const cerebrasService: AIService = {
     }
 
     const options: any = {
-      model: "llama3.1-70b",
+      model: "llama-3.3-70b",
       messages,
       stream: true,
     };
@@ -20,7 +20,7 @@ export const cerebrasService: AIService = {
       options.tools = tools;
     }
 
-    const stream = await cerebras.chat.completions.create(options);
+    const stream = (await cerebras.chat.completions.create(options)) as any;
 
     for await (const chunk of stream) {
       yield {

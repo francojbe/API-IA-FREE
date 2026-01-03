@@ -72,7 +72,9 @@ const cleanMessages = (messages: any): ChatMessage[] => {
     }
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
     else if (m.content && typeof m.content === 'object') content = JSON.stringify(m.content);
-    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || m.arguments || m.text || JSON.stringify(m);
+    else if (typeof m === 'object' && !m.content && !m.tool_calls) {
+      content = m.output || m.input || m.arguments || m.text || (typeof m.text === 'object' ? m.text.content || JSON.stringify(m.text) : null) || JSON.stringify(m);
+    }
 
     const msg: ChatMessage = { role: role as any, content };
 
@@ -85,7 +87,10 @@ const cleanMessages = (messages: any): ChatMessage[] => {
         msg.tool_calls = [{
           id: m.id || m.tool_call_id || 'call_' + Math.random().toString(36).substring(7),
           type: 'function',
-          function: { name: m.name, arguments: m.arguments }
+          function: {
+            name: m.name,
+            arguments: typeof m.arguments === 'string' ? m.arguments : JSON.stringify(m.arguments)
+          }
         }];
         msg.content = "";
       }
