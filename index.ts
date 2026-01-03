@@ -71,7 +71,8 @@ const cleanMessages = (messages: any): ChatMessage[] => {
       content = m.content.map((v: any) => (typeof v === 'string' ? v : (v.text || v.input || JSON.stringify(v)))).join(' ');
     }
     else if (m.text) content = typeof m.text === 'string' ? m.text : (m.text.content || "");
-    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || m.arguments || JSON.stringify(m);
+    else if (m.content && typeof m.content === 'object') content = JSON.stringify(m.content);
+    else if (typeof m === 'object' && !m.content && !m.tool_calls) content = m.input || m.arguments || m.text || JSON.stringify(m);
 
     const msg: ChatMessage = { role: role as any, content };
 
@@ -97,7 +98,9 @@ const cleanMessages = (messages: any): ChatMessage[] => {
       if (!msg.tool_call_id) {
         for (let i = cleaned.length - 1; i >= 0; i--) {
           if (cleaned[i].tool_calls?.[0]?.id) {
-            msg.tool_call_id = cleaned[i].tool_calls[0].id;
+            msg.tool_call_id = Array.isArray(cleaned[i].tool_calls)
+              ? cleaned[i].tool_calls![0].id
+              : (cleaned[i].tool_calls as any).id;
             break;
           }
         }
@@ -112,7 +115,18 @@ const cleanMessages = (messages: any): ChatMessage[] => {
     cleaned.push(msg);
   }
 
-  return cleaned.filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
+  // POST-PROCESAMIENTO: Fusionar mensajes consecutivos del mismo rol (Llama 3 lo requiere)
+  const merged: ChatMessage[] = [];
+  for (const msg of cleaned) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === msg.role && msg.role !== 'tool' && msg.role !== 'assistant') {
+      last.content += "\n" + msg.content;
+    } else {
+      merged.push(msg);
+    }
+  }
+
+  return merged.filter(m => (m.content && m.content.trim() !== '') || m.tool_calls || m.role === 'tool');
 };
 
 const normalizeTools = (tools: any[]): any[] | undefined => {
@@ -170,8 +184,16 @@ const handleChatCompletions = async (c: any) => {
       }
     });
   } else {
+    let lastServiceError = "No hay servicios configurados";
     for (const service of [...rotationServices, lastResortService]) {
       if (!service) continue;
+
+      // Gemini no soporta herramientas en esta implementación
+      if (tools && service.name.includes('Gemini')) {
+        console.log(`⏭️  Saltando [${service.name}] porque hay herramientas`);
+        continue;
+      }
+
       try {
         let fullText = '';
         const toolCallMap = new Map<number, any>();
@@ -275,11 +297,17 @@ const handleChatCompletions = async (c: any) => {
         console.log(`📊 Estado global: ${response.status} | Salidas: ${response.output.length}`);
         return c.json(response);
       } catch (e: any) {
-        console.error(`❌ [FALLO] ${service.name}: ${e.message || e}`);
+        lastServiceError = e.message || String(e);
+        console.error(`❌ [FALLO] ${service.name}: ${lastServiceError}`);
         // Si hay un error, el loop 'for' continúa automáticamente al siguiente servicio
       }
     }
-    return c.json({ error: 'Servicios no disponibles' }, 503);
+    console.error(`🔴 [ERROR AGOTADO] Todos los servicios fallaron. Último error: ${lastServiceError}`);
+    return c.json({
+      error: 'Servicios no disponibles',
+      details: lastServiceError,
+      hint: 'Verifica los logs del proxy para el historial de mensajes enviado'
+    }, 503);
   }
 };
 
