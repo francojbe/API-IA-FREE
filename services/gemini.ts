@@ -10,7 +10,7 @@ export const geminiService: AIService = {
             genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
         }
 
-        const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+        const model = genAI.getGenerativeModel({ model: "gemini-3-flash" });
 
         // Mapear mensajes al formato de Gemini soportando multimodalidad
         const history = messages.slice(0, -1).map(m => {
