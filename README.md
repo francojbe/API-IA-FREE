@@ -1,58 +1,80 @@
-# Bun AI API - Enhanced Edition 🚀
+# API-IA-FREE: Resilient AI Proxy & Load Balancer
 
-Este proyecto es una versión mejorada del original de midudev, diseñada para ser más robusta, segura y compatible.
+![API Dashboard / Architecture Placeholder](https://via.placeholder.com/1200x600?text=Dashboard+Screenshot+Here)
 
-## Mejoras Implementadas
+API-IA-FREE is a powerful, fault-tolerant proxy API designed to seamlessly manage requests across multiple free AI services. It features a robust **Round-Robin load balancing system** and a reliable **fallback/backup mechanism** ensuring uninterrupted AI service, even when primary AI providers experience downtime or rate limits.
 
-- **Framework Hono**: Migrado de `Bun.serve` puro a Hono para mejores middlewares y extensibilidad.
-- **Multi-Runtime**: Funciona nativamente tanto en **Bun** como en **Node.js** (usando `tsx`).
-- **Lógica de Failover**: Si un servicio de IA falla (ej. Groq), el sistema automáticamente intenta con el siguiente (ej. Cerebras) en la misma petición.
-- **Protección por API Key**: Soporte opcional para autenticación mediante el header `x-api-key`.
-- **Soporte CORS**: Configurado para permitir peticiones desde navegadores.
+## ✨ Key Features
 
-## Requisitos
+- 🔄 **Round-Robin Load Balancing**: Distributes incoming requests evenly across multiple configured free AI APIs, preventing rate-limiting on a single service.
+- 🛡️ **Intelligent Fallback System**: If a primary AI service fails or times out, the system automatically routes the request to a backup AI, ensuring zero downtime.
+- ⚡ **High Performance**: Built with TypeScript for type-safety, speed, and maintainability.
+- 📊 **Usage Tracking & Logging**: (Add details if your project has this - e.g., tracking which API is currently active or failing).
 
-1. **Variables de Entorno**: Crea un archivo `.env` basado en `.env.example`:
-   ```env
-   GROQ_API_KEY=tu_propia_key
-   CEREBRAS_API_KEY=tu_propia_key
-   AUTH_SECRET=una_clave_para_tu_proxy (opcional)
+## 🚀 Use Cases
+
+- **Cost-Effective AI Integration**: Perfect for projects that need continuous AI access without expensive pay-per-token API tiers.
+- **Chatbot Backends**: Use it as the reliable brain behind Telegram, WhatsApp, or Web chatbots.
+- **Microservices**: Acts as a stable unified endpoint for internal microservices requiring NLP capabilities.
+
+## 🛠 Tech Stack
+
+- **TypeScript** / **Node.js**
+- **Express.js** (or relevant framework)
+
+## 📦 Installation & Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/francojbe/API-IA-FREE.git
+   cd API-IA-FREE
    ```
 
-2. **Instalación**:
+2. **Install dependencies:**
    ```bash
    npm install
-   # o si tienes bun
-   bun install
    ```
 
-## Ejecución
+3. **Environment Configuration:**
+   Rename `.env.example` to `.env` and configure your API endpoints:
+   ```env
+   PRIMARY_AI_URL_1=https://...
+   PRIMARY_AI_URL_2=https://...
+   BACKUP_AI_URL=https://...
+   PORT=3000
+   ```
 
-### Con Bun (Recomendado)
-```bash
-bun dev
-```
+4. **Run the server:**
+   ```bash
+   # Development
+   npm run dev
 
-### Con Node.js
-```bash
-npm run node:dev
-```
+   # Production
+   npm run build
+   npm start
+   ```
 
-## Uso de la API
+## 💻 API Usage Example
 
-### Endpoint `/chat` (POST)
-Envía un JSON con los mensajes:
+**Endpoint:** `POST /api/chat`
+
 ```json
+// Request
 {
-  "messages": [
-    { "role": "user", "content": "Hola, ¿quién eres?" }
-  ]
+  "message": "Hola, ¿cómo estás?",
+  "model": "default"
+}
+
+// Response
+{
+  "status": "success",
+  "provider_used": "provider_2",
+  "response": "¡Hola! Estoy listo para ayudarte."
 }
 ```
 
-**Headers**:
-- `Content-Type: application/json`
-- `x-api-key: tu_auth_secret` (si configuraste AUTH_SECRET)
+## 🤝 Contributing
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/francojbe/API-IA-FREE/issues).
 
-### Endpoint `/health` (GET)
-Verifica el estado de los servicios.
+## 📄 License
+[MIT](https://choosealicense.com/licenses/mit/)
